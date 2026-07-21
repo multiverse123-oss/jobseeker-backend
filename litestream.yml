@@ -1,0 +1,11 @@
+dbs:
+  - path: /app/pb_data/data.db
+    replicas:
+      - type: s3
+        bucket: jobseeker-bucket
+        path: jobseeker-db
+        endpoint: s3.us-midwest-1.idrivee2.com
+        region: us-midwest-1
+        access-key-id: gDTPNc7uWisLoAOVwmxy
+        secret-access-key: P5DjY5xD4ja0vt8v4x8JWZvNQBHFuT0JxiMgde9H
+        force-path-style: true
