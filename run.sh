@@ -37,5 +37,5 @@ echo "[*] Starting JobSeeker AI worker..."
 /app/worker-venv/bin/python /app/worker.py &
 WORKER_PID=$!
 
-# Keep the container alive forever (no illegal -n flags)
+# Keep the container alive forever
 sleep infinity

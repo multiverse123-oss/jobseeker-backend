@@ -1,8 +1,8 @@
 FROM python:3.11-slim
 
-# Install system dependencies: wget, unzip, ca-certificates, and Playwright deps (Chromium)
+# Install system dependencies: git (needed for pip git install), wget, unzip, ca-certificates, Chromium, etc.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    wget unzip ca-certificates \
+    git wget unzip ca-certificates \
     chromium chromium-driver \
     fonts-liberation libasound2 libatk-bridge2.0-0 libatk1.0-0 libcups2 libdrm2 \
     libgbm1 libgtk-3-0 libnspr4 libnss3 libx11-xcb1 libxcomposite1 libxdamage1 \
@@ -20,7 +20,7 @@ RUN wget -q https://github.com/benbjohnson/litestream/releases/download/v0.3.13/
 # Set up a virtual environment for the worker
 RUN python -m venv /app/worker-venv
 
-# Copy worker requirements and install them (Playwright will now install without issues)
+# Copy worker requirements and install them (Playwright + jobspy from git)
 COPY worker/requirements.txt /app/worker-requirements.txt
 RUN /app/worker-venv/bin/pip install --no-cache-dir -r /app/worker-requirements.txt
 
