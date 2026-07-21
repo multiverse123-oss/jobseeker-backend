@@ -1,13 +1,13 @@
-FROM alpine:3.19
+FROM python:3.11-slim
 
-# Install system dependencies for PocketBase, Litestream, Python3, pip, and Chromium (for Playwright)
-RUN apk add --no-cache \
-    ca-certificates wget unzip \
-    python3 py3-pip \
-    chromium chromium-chromedriver \
-    nss freetype harfbuzz \
-    font-dejavu fontconfig \
-    && rm -rf /var/cache/apk/*
+# Install system dependencies: wget, unzip, ca-certificates, and Playwright deps (Chromium)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    wget unzip ca-certificates \
+    chromium chromium-driver \
+    fonts-liberation libasound2 libatk-bridge2.0-0 libatk1.0-0 libcups2 libdrm2 \
+    libgbm1 libgtk-3-0 libnspr4 libnss3 libx11-xcb1 libxcomposite1 libxdamage1 \
+    libxrandr2 xdg-utils \
+    && rm -rf /var/lib/apt/lists/*
 
 # PocketBase
 RUN wget -q -O /tmp/pb.zip https://github.com/pocketbase/pocketbase/releases/download/v0.22.21/pocketbase_0.22.21_linux_amd64.zip \
@@ -17,10 +17,10 @@ RUN wget -q -O /tmp/pb.zip https://github.com/pocketbase/pocketbase/releases/dow
 RUN wget -q https://github.com/benbjohnson/litestream/releases/download/v0.3.13/litestream-v0.3.13-linux-amd64.tar.gz \
     && tar -xzf litestream-v0.3.13-linux-amd64.tar.gz -C /app && rm litestream-v0.3.13-linux-amd64.tar.gz && chmod +x /app/litestream
 
-# Create a virtual environment for the worker
-RUN python3 -m venv /app/worker-venv
+# Set up a virtual environment for the worker
+RUN python -m venv /app/worker-venv
 
-# Copy worker requirements and install (this pulls Playwright driver – large, but inside the image)
+# Copy worker requirements and install them (Playwright will now install without issues)
 COPY worker/requirements.txt /app/worker-requirements.txt
 RUN /app/worker-venv/bin/pip install --no-cache-dir -r /app/worker-requirements.txt
 
