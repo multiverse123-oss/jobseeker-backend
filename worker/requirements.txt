@@ -2,5 +2,5 @@ requests
 python-dotenv
 fpdf2
 openai
-jobspy
+git+https://github.com/cullenwatson/jobspy.git
 playwright

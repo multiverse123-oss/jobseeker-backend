@@ -26,7 +26,7 @@ PB_PID=$!
 
 sleep 3
 
-# Worker setup
+# Worker environment
 export POCKETBASE_URL="http://localhost:8090"
 export POCKETBASE_ADMIN_TOKEN="${POCKETBASE_ADMIN_TOKEN:-eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3ODU4MDYwMTAsImlkIjoidzFtN3pna2Z2dG5xbmg5IiwidHlwZSI6ImFkbWluIn0.H0IuaaTm9BUTunuIafPbpF6VBlQzQ_2qihAXfFEcKEI}"
 export MISTRAL_API_KEY="${MISTRAL_API_KEY:-7Y9YTSfAfqL4MEHL6YHPH5BEOlONfVU2}"
@@ -37,5 +37,5 @@ echo "[*] Starting JobSeeker AI worker..."
 /app/worker-venv/bin/python /app/worker.py &
 WORKER_PID=$!
 
-# Wait for both to keep the container alive (simple wait works in all shells)
-wait
+# Keep the container alive forever (no illegal -n flags)
+sleep infinity
