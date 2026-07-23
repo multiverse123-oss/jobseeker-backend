@@ -24,7 +24,6 @@ def pb(method, path, json_data=None):
     headers = {"Authorization": f"Bearer {POCKETBASE_ADMIN_TOKEN}"}
     return requests.request(method, url, headers=headers, json=json_data)
 
-# ---------- CHAT LOOP (every 10 seconds) ----------
 def fast_chat_loop():
     while True:
         try:
@@ -32,15 +31,12 @@ def fast_chat_loop():
             if resp.status_code != 200:
                 time.sleep(5)
                 continue
-            messages = resp.json().get("items", [])
-            for msg in messages:
+            for msg in resp.json().get("items", []):
                 msg_id = msg["id"]
                 user_id = msg["user"]
                 text = msg["message"]
                 user = pb("GET", f"/collections/users/records/{user_id}").json()
-                ctx = ""
-                if user:
-                    ctx = f"User skills: {user.get('skills','')}. Desired job: {user.get('desired_job_title','')}"
+                ctx = f"User skills: {user.get('skills','')}. Desired job: {user.get('desired_job_title','')}" if user else ""
                 prompt = f"{ctx}\nUser: {text}\nAnswer helpfully and suggest job search queries."
                 try:
                     resp_ai = ai.chat.completions.create(
@@ -59,7 +55,6 @@ def fast_chat_loop():
             logging.error(f"Fast chat loop error: {e}")
         time.sleep(10)
 
-# ---------- JOB SCRAPING (4 sources, every 10 min) ----------
 def fetch_all_users():
     resp = pb("GET", "/collections/users/records")
     return resp.json().get("items", []) if resp.status_code == 200 else []
