@@ -135,3 +135,44 @@ def fast_chat_loop():
         except Exception as e:
             logging.error(f"Fast chat loop error: {e}")
         time.sleep(10)
+
+# Fast chat loop (runs in a thread, replies every 10 seconds)
+def fast_chat_loop():
+    while True:
+        try:
+            resp = pb("GET", "/collections/chat_messages/records?filter=(response='')&sort=created&perPage=10")
+            if resp.status_code != 200:
+                time.sleep(5)
+                continue
+            messages = resp.json().get("items", [])
+            for msg in messages:
+                msg_id = msg["id"]
+                user_id = msg["user"]
+                text = msg["message"]
+                user = pb("GET", f"/collections/users/records/{user_id}").json()
+                ctx = ""
+                if user:
+                    ctx = f"User skills: {user.get('skills','')}. Desired job: {user.get('desired_job_title','')}"
+                prompt = f"{ctx}\nUser: {text}\nAnswer helpfully and suggest job search queries."
+                try:
+                    import openai
+                    ai = openai.OpenAI(api_key=os.getenv("MISTRAL_API_KEY"), base_url="https://api.mistral.ai/v1")
+                    resp_ai = ai.chat.completions.create(
+                        model="mistral-small-latest",
+                        messages=[{"role":"user","content":prompt}],
+                        temperature=0.7,
+                        max_tokens=150
+                    )
+                    answer = resp_ai.choices[0].message.content.strip()
+                    pb("PATCH", f"/collections/chat_messages/records/{msg_id}", json_data={"response": answer})
+                    logging.info(f"Replied to chat {msg_id}")
+                except Exception as e:
+                    logging.error(f"Chat failed: {e}")
+                time.sleep(0.2)
+        except Exception as e:
+            logging.error(f"Fast chat loop error: {e}")
+        time.sleep(10)
+
+# Start the chat loop in a background thread
+import threading
+threading.Thread(target=fast_chat_loop, daemon=True).start()
