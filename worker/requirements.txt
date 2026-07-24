@@ -4,3 +4,5 @@ fpdf2
 openai
 git+https://github.com/cullenwatson/jobspy.git
 playwright
+serpapi
+google-search-results
