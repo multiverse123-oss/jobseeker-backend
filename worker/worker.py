@@ -24,20 +24,60 @@ def pb(method, path, json_data=None):
     headers = {"Authorization": f"Bearer {POCKETBASE_ADMIN_TOKEN}"}
     return requests.request(method, url, headers=headers, json=json_data)
 
+# ---------- AI QUERY PARSER ----------
+def parse_natural_query(raw_query):
+    """
+    Use Mistral to extract structured search parameters from natural language.
+    Returns a dict with keys: title, location, remote, company, etc.
+    """
+    prompt = f"""Extract the key job search parameters from the following user query. Return ONLY a valid JSON object with these keys (use null if not mentioned):
+- title: the job title or keywords (string)
+- location: the desired location (string, e.g., "Nigeria", "Canada", "Remote")
+- remote: true if remote work is requested, false otherwise
+- company: specific company name if mentioned, otherwise null
+- additional_filters: any other relevant words (string, e.g., "full-time, part-time")
+
+User query: "{raw_query}"
+
+JSON:"""
+    try:
+        resp = ai.chat.completions.create(
+            model="mistral-small-latest",
+            messages=[{"role":"user","content":prompt}],
+            temperature=0.1,
+            max_tokens=200
+        )
+        content = resp.choices[0].message.content.strip()
+        # Extract the JSON from the response (it might be surrounded by triple backticks)
+        if content.startswith("```"):
+            content = content.split("\n", 1)[1].rsplit("\n", 1)[0]
+        params = json.loads(content)
+        return params
+    except Exception as e:
+        logging.error(f"Query parsing failed: {e}, using raw query as title")
+        return {"title": raw_query, "location": None, "remote": False, "company": None, "additional_filters": None}
+
+def build_structured_search(params):
+    """Convert parsed parameters into a search string and location for SerpAPI."""
+    title = params.get("title") or ""
+    location = params.get("location") or ""
+    remote = params.get("remote", False)
+    company = params.get("company") or ""
+    extra = params.get("additional_filters") or ""
+    query_parts = [title, company, extra]
+    if remote:
+        query_parts.append("remote")
+    query = " ".join(filter(None, query_parts)).strip()
+    return query, location if location else "United States"
+
 # ---------- CONVERSATION MEMORY BUILDER ----------
 def get_conversation_history(user_id, current_msg_id=None, limit=15):
-    """
-    Fetch the last 'limit' messages for a user, sorted oldest first,
-    and format them as a dialogue.
-    """
     resp = pb("GET", f"/collections/chat_messages/records?filter=(user='{user_id}')&sort=created&perPage={limit}")
     if resp.status_code != 200:
         return []
     items = resp.json().get("items", [])
-    # Exclude the current message (if we have its ID) to avoid duplication
     if current_msg_id:
         items = [m for m in items if m["id"] != current_msg_id]
-    # Format as a simple dialogue string
     dialogue = []
     for m in items:
         if m["message"]:
@@ -59,15 +99,11 @@ def fast_chat_loop():
                 msg_id = msg["id"]
                 user_id = msg["user"]
                 text = msg["message"]
-
-                # Build full prompt: history + user profile + current message
                 user = pb("GET", f"/collections/users/records/{user_id}").json()
                 profile = ""
                 if user:
                     profile = f"User profile: skills={user.get('skills','')}, desired job={user.get('desired_job_title','')}"
-
                 history = get_conversation_history(user_id, current_msg_id=msg_id, limit=15)
-
                 full_prompt = f"""
 You are a helpful, friendly, and knowledgeable career coach and interview trainer.
 Your name is JobSeeker AI Coach. You remember all previous conversations with this user.
@@ -79,14 +115,14 @@ Conversation history:
 
 The user just said: "{text}"
 
-Respond helpfully, keeping the context of the conversation. If the user is in the middle of a rehearsal, continue it. If they asked a question, answer it. If they asked for job search advice, provide it.
+Respond helpfully, keeping the context of the conversation.
 """
                 try:
                     resp_ai = ai.chat.completions.create(
                         model="mistral-small-latest",
                         messages=[{"role":"user","content":full_prompt}],
                         temperature=0.7,
-                        max_tokens=300   # slightly more for context
+                        max_tokens=300
                     )
                     answer = resp_ai.choices[0].message.content.strip()
                     pb("PATCH", f"/collections/chat_messages/records/{msg_id}", json_data={"response": answer})
@@ -194,6 +230,40 @@ def insert_jobs_if_new(jobs):
     logging.info(f"Inserted {inserted} new jobs")
     return inserted
 
+# ---------- SEARCH REQUESTS PROCESSING ----------
+def process_search_requests():
+    """Continuously check for pending job_search_requests and execute them."""
+    while True:
+        try:
+            resp = pb("GET", "/collections/job_search_requests/records?filter=(status='pending')&sort=created&perPage=5")
+            if resp.status_code != 200:
+                time.sleep(5)
+                continue
+            for req in resp.json().get("items", []):
+                req_id = req["id"]
+                user_id = req["user"]
+                raw_query = req["query"]
+                # Mark as running
+                pb("PATCH", f"/collections/job_search_requests/records/{req_id}", json_data={"status":"running"})
+                # Parse the natural language query
+                params = parse_natural_query(raw_query)
+                query, location = build_structured_search(params)
+                logging.info(f"Search request {req_id}: parsed query='{query}', location='{location}'")
+                # Scrape from multiple sources
+                all_jobs = []
+                all_jobs.extend(search_serpapi(query, location, num=15))
+                all_jobs.extend(search_adzuna(query, location, num=15))
+                all_jobs.extend(search_remotive(query, num=15))
+                all_jobs.extend(search_remoteok(query, num=15))
+                unique = normalize_and_deduplicate(all_jobs)
+                inserted_ids = insert_jobs_if_new(unique)
+                # Mark as completed, store the new job IDs (for frontend to fetch later)
+                pb("PATCH", f"/collections/job_search_requests/records/{req_id}", json_data={"status":"completed", "results": inserted_ids})
+                logging.info(f"Search request {req_id} completed, {len(inserted_ids)} new jobs")
+        except Exception as e:
+            logging.error(f"Search request loop error: {e}")
+        time.sleep(10)
+
 def scraping_loop():
     while True:
         logging.info("=== Lightweight job cycle ===")
@@ -215,4 +285,5 @@ def scraping_loop():
 
 if __name__ == "__main__":
     threading.Thread(target=fast_chat_loop, daemon=True).start()
+    threading.Thread(target=process_search_requests, daemon=True).start()
     scraping_loop()
