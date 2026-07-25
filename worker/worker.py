@@ -24,6 +24,29 @@ def pb(method, path, json_data=None):
     headers = {"Authorization": f"Bearer {POCKETBASE_ADMIN_TOKEN}"}
     return requests.request(method, url, headers=headers, json=json_data)
 
+# ---------- CONVERSATION MEMORY BUILDER ----------
+def get_conversation_history(user_id, current_msg_id=None, limit=15):
+    """
+    Fetch the last 'limit' messages for a user, sorted oldest first,
+    and format them as a dialogue.
+    """
+    resp = pb("GET", f"/collections/chat_messages/records?filter=(user='{user_id}')&sort=created&perPage={limit}")
+    if resp.status_code != 200:
+        return []
+    items = resp.json().get("items", [])
+    # Exclude the current message (if we have its ID) to avoid duplication
+    if current_msg_id:
+        items = [m for m in items if m["id"] != current_msg_id]
+    # Format as a simple dialogue string
+    dialogue = []
+    for m in items:
+        if m["message"]:
+            dialogue.append(f"User: {m['message']}")
+        if m["response"]:
+            dialogue.append(f"Assistant: {m['response']}")
+    return "\n".join(dialogue)
+
+# ---------- FAST CHAT LOOP (10 seconds) ----------
 def fast_chat_loop():
     while True:
         try:
@@ -31,19 +54,39 @@ def fast_chat_loop():
             if resp.status_code != 200:
                 time.sleep(5)
                 continue
-            for msg in resp.json().get("items", []):
+            messages = resp.json().get("items", [])
+            for msg in messages:
                 msg_id = msg["id"]
                 user_id = msg["user"]
                 text = msg["message"]
+
+                # Build full prompt: history + user profile + current message
                 user = pb("GET", f"/collections/users/records/{user_id}").json()
-                ctx = f"User skills: {user.get('skills','')}. Desired job: {user.get('desired_job_title','')}" if user else ""
-                prompt = f"{ctx}\nUser: {text}\nAnswer helpfully and suggest job search queries."
+                profile = ""
+                if user:
+                    profile = f"User profile: skills={user.get('skills','')}, desired job={user.get('desired_job_title','')}"
+
+                history = get_conversation_history(user_id, current_msg_id=msg_id, limit=15)
+
+                full_prompt = f"""
+You are a helpful, friendly, and knowledgeable career coach and interview trainer.
+Your name is JobSeeker AI Coach. You remember all previous conversations with this user.
+
+{profile}
+
+Conversation history:
+{history if history else 'No previous conversation.'}
+
+The user just said: "{text}"
+
+Respond helpfully, keeping the context of the conversation. If the user is in the middle of a rehearsal, continue it. If they asked a question, answer it. If they asked for job search advice, provide it.
+"""
                 try:
                     resp_ai = ai.chat.completions.create(
                         model="mistral-small-latest",
-                        messages=[{"role":"user","content":prompt}],
+                        messages=[{"role":"user","content":full_prompt}],
                         temperature=0.7,
-                        max_tokens=150
+                        max_tokens=300   # slightly more for context
                     )
                     answer = resp_ai.choices[0].message.content.strip()
                     pb("PATCH", f"/collections/chat_messages/records/{msg_id}", json_data={"response": answer})
@@ -55,6 +98,7 @@ def fast_chat_loop():
             logging.error(f"Fast chat loop error: {e}")
         time.sleep(10)
 
+# ---------- JOB SCRAPING (unchanged) ----------
 def fetch_all_users():
     resp = pb("GET", "/collections/users/records")
     return resp.json().get("items", []) if resp.status_code == 200 else []
