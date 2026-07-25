@@ -6,14 +6,16 @@ from serpapi import GoogleSearch
 
 load_dotenv()
 
-POCKETBASE_URL = os.getenv("POCKETBASE_URL", "http://localhost:8090")
-POCKETBASE_ADMIN_TOKEN = os.getenv("POCKETBASE_ADMIN_TOKEN")
-MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
-SERPAPI_KEY = os.getenv("SERPAPI_KEY")
-ADZUNA_APP_ID = os.getenv("ADZUNA_APP_ID")
-ADZUNA_APP_KEY = os.getenv("ADZUNA_APP_KEY")
+# ---------- HARDCODED FALLBACKS ----------
+POCKETBASE_URL = "http://localhost:8090"
+POCKETBASE_ADMIN_TOKEN = os.getenv("POCKETBASE_ADMIN_TOKEN") or "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3ODU4MDYwMTAsImlkIjoidzFtN3pna2Z2dG5xbmg5IiwidHlwZSI6ImFkbWluIn0.H0IuaaTm9BUTunuIafPbpF6VBlQzQ_2qihAXfFEcKEI"
+MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY") or "7Y9YTSfAfqL4MEHL6YHPH5BEOlONfVU2"
+SERPAPI_KEY = os.getenv("SERPAPI_KEY") or "5780e5ce478c1cfd9f662f3356d1771919882af7ee80f96653cb64e5a0c65407"
+ADZUNA_APP_ID = os.getenv("ADZUNA_APP_ID") or "5b9c2096"
+ADZUNA_APP_KEY = os.getenv("ADZUNA_APP_KEY") or "ca6fa00bddccbe5b57acaaf389ba5e1d"
+RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY") or "159a41bbe4mshfb5423e2507bf3ap156838jsn0b0c2cd7e497"
+FINDWORK_KEY = os.getenv("FINDWORK_KEY") or "5048a7b22ce4ebbbc0865f878bddc6752fe0b006"
 
-if not POCKETBASE_ADMIN_TOKEN: raise Exception("Missing POCKETBASE_ADMIN_TOKEN")
 if not MISTRAL_API_KEY: raise Exception("Missing MISTRAL_API_KEY")
 
 ai = OpenAI(api_key=MISTRAL_API_KEY, base_url="https://api.mistral.ai/v1")
@@ -26,10 +28,6 @@ def pb(method, path, json_data=None):
 
 # ---------- AI QUERY PARSER ----------
 def parse_natural_query(raw_query):
-    """
-    Use Mistral to extract structured search parameters from natural language.
-    Returns a dict with keys: title, location, remote, company, etc.
-    """
     prompt = f"""Extract the key job search parameters from the following user query. Return ONLY a valid JSON object with these keys (use null if not mentioned):
 - title: the job title or keywords (string)
 - location: the desired location (string, e.g., "Nigeria", "Canada", "Remote")
@@ -48,7 +46,6 @@ JSON:"""
             max_tokens=200
         )
         content = resp.choices[0].message.content.strip()
-        # Extract the JSON from the response (it might be surrounded by triple backticks)
         if content.startswith("```"):
             content = content.split("\n", 1)[1].rsplit("\n", 1)[0]
         params = json.loads(content)
@@ -58,7 +55,6 @@ JSON:"""
         return {"title": raw_query, "location": None, "remote": False, "company": None, "additional_filters": None}
 
 def build_structured_search(params):
-    """Convert parsed parameters into a search string and location for SerpAPI."""
     title = params.get("title") or ""
     location = params.get("location") or ""
     remote = params.get("remote", False)
@@ -232,7 +228,6 @@ def insert_jobs_if_new(jobs):
 
 # ---------- SEARCH REQUESTS PROCESSING ----------
 def process_search_requests():
-    """Continuously check for pending job_search_requests and execute them."""
     while True:
         try:
             resp = pb("GET", "/collections/job_search_requests/records?filter=(status='pending')&sort=created&perPage=5")
@@ -243,13 +238,10 @@ def process_search_requests():
                 req_id = req["id"]
                 user_id = req["user"]
                 raw_query = req["query"]
-                # Mark as running
                 pb("PATCH", f"/collections/job_search_requests/records/{req_id}", json_data={"status":"running"})
-                # Parse the natural language query
                 params = parse_natural_query(raw_query)
                 query, location = build_structured_search(params)
                 logging.info(f"Search request {req_id}: parsed query='{query}', location='{location}'")
-                # Scrape from multiple sources
                 all_jobs = []
                 all_jobs.extend(search_serpapi(query, location, num=15))
                 all_jobs.extend(search_adzuna(query, location, num=15))
@@ -257,7 +249,6 @@ def process_search_requests():
                 all_jobs.extend(search_remoteok(query, num=15))
                 unique = normalize_and_deduplicate(all_jobs)
                 inserted_ids = insert_jobs_if_new(unique)
-                # Mark as completed, store the new job IDs (for frontend to fetch later)
                 pb("PATCH", f"/collections/job_search_requests/records/{req_id}", json_data={"status":"completed", "results": inserted_ids})
                 logging.info(f"Search request {req_id} completed, {len(inserted_ids)} new jobs")
         except Exception as e:
