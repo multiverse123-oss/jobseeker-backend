@@ -214,17 +214,20 @@ def normalize_and_deduplicate(jobs):
     return unique
 
 def insert_jobs_if_new(jobs):
-    inserted = 0
+    """Insert jobs and return a list of the newly created record IDs."""
+    inserted_ids = []
     for job in jobs:
         if not job["title"]: continue
         filter_str = f"(title='{job['title']}'&&company='{job['company']}'&&source_url='{job['source_url']}')"
         resp = pb("GET", f"/collections/job_listings/records?filter={filter_str}")
         if resp.status_code == 200 and resp.json()["totalItems"] == 0:
-            pb("POST", "/collections/job_listings/records", json_data=job)
-            inserted += 1
+            create_resp = pb("POST", "/collections/job_listings/records", json_data=job)
+            if create_resp.status_code == 200:
+                new_id = create_resp.json()["id"]
+                inserted_ids.append(new_id)
         time.sleep(0.05)
-    logging.info(f"Inserted {inserted} new jobs")
-    return inserted
+    logging.info(f"Inserted {len(inserted_ids)} new jobs")
+    return inserted_ids
 
 # ---------- SEARCH REQUESTS PROCESSING ----------
 def process_search_requests():
@@ -248,9 +251,9 @@ def process_search_requests():
                 all_jobs.extend(search_remotive(query, num=15))
                 all_jobs.extend(search_remoteok(query, num=15))
                 unique = normalize_and_deduplicate(all_jobs)
-                inserted_ids = insert_jobs_if_new(unique)
-                pb("PATCH", f"/collections/job_search_requests/records/{req_id}", json_data={"status":"completed", "results": inserted_ids})
-                logging.info(f"Search request {req_id} completed, {len(inserted_ids)} new jobs")
+                new_ids = insert_jobs_if_new(unique)
+                pb("PATCH", f"/collections/job_search_requests/records/{req_id}", json_data={"status":"completed", "results": new_ids})
+                logging.info(f"Search request {req_id} completed, {len(new_ids)} new jobs")
         except Exception as e:
             logging.error(f"Search request loop error: {e}")
         time.sleep(10)
