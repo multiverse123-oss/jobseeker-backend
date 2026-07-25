@@ -1,22 +1,23 @@
 import os, time, logging, json, threading
 import requests
-from dotenv import load_dotenv
 from openai import OpenAI
 from serpapi import GoogleSearch
 
-load_dotenv()
-
-# ---------- HARDCODED FALLBACKS ----------
+# ---------- KEYS FROM ENVIRONMENT (Render will provide them) ----------
 POCKETBASE_URL = "http://localhost:8090"
-POCKETBASE_ADMIN_TOKEN = os.getenv("POCKETBASE_ADMIN_TOKEN") or "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3ODU4MDYwMTAsImlkIjoidzFtN3pna2Z2dG5xbmg5IiwidHlwZSI6ImFkbWluIn0.H0IuaaTm9BUTunuIafPbpF6VBlQzQ_2qihAXfFEcKEI"
-MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY") or "7Y9YTSfAfqL4MEHL6YHPH5BEOlONfVU2"
-SERPAPI_KEY = os.getenv("SERPAPI_KEY") or "5780e5ce478c1cfd9f662f3356d1771919882af7ee80f96653cb64e5a0c65407"
-ADZUNA_APP_ID = os.getenv("ADZUNA_APP_ID") or "5b9c2096"
-ADZUNA_APP_KEY = os.getenv("ADZUNA_APP_KEY") or "ca6fa00bddccbe5b57acaaf389ba5e1d"
-RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY") or "159a41bbe4mshfb5423e2507bf3ap156838jsn0b0c2cd7e497"
-FINDWORK_KEY = os.getenv("FINDWORK_KEY") or "5048a7b22ce4ebbbc0865f878bddc6752fe0b006"
+POCKETBASE_ADMIN_TOKEN = os.getenv("POCKETBASE_ADMIN_TOKEN")
+MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
+SERPAPI_KEY = os.getenv("SERPAPI_KEY")
+ADZUNA_APP_ID = os.getenv("ADZUNA_APP_ID")
+ADZUNA_APP_KEY = os.getenv("ADZUNA_APP_KEY")
+RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY")
+FINDWORK_KEY = os.getenv("FINDWORK_KEY")
 
-if not MISTRAL_API_KEY: raise Exception("Missing MISTRAL_API_KEY")
+# Validate critical keys
+if not POCKETBASE_ADMIN_TOKEN:
+    raise Exception("Missing POCKETBASE_ADMIN_TOKEN environment variable")
+if not MISTRAL_API_KEY:
+    raise Exception("Missing MISTRAL_API_KEY environment variable")
 
 ai = OpenAI(api_key=MISTRAL_API_KEY, base_url="https://api.mistral.ai/v1")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -49,6 +50,7 @@ JSON:"""
         if content.startswith("```"):
             content = content.split("\n", 1)[1].rsplit("\n", 1)[0]
         params = json.loads(content)
+        logging.info(f"Parsed query '{raw_query}' -> {params}")
         return params
     except Exception as e:
         logging.error(f"Query parsing failed: {e}, using raw query as title")
@@ -66,7 +68,7 @@ def build_structured_search(params):
     query = " ".join(filter(None, query_parts)).strip()
     return query, location if location else "United States"
 
-# ---------- CONVERSATION MEMORY BUILDER ----------
+# ---------- CONVERSATION MEMORY ----------
 def get_conversation_history(user_id, current_msg_id=None, limit=15):
     resp = pb("GET", f"/collections/chat_messages/records?filter=(user='{user_id}')&sort=created&perPage={limit}")
     if resp.status_code != 200:
@@ -82,7 +84,7 @@ def get_conversation_history(user_id, current_msg_id=None, limit=15):
             dialogue.append(f"Assistant: {m['response']}")
     return "\n".join(dialogue)
 
-# ---------- FAST CHAT LOOP (10 seconds) ----------
+# ---------- FAST CHAT LOOP ----------
 def fast_chat_loop():
     while True:
         try:
@@ -130,7 +132,7 @@ Respond helpfully, keeping the context of the conversation.
             logging.error(f"Fast chat loop error: {e}")
         time.sleep(10)
 
-# ---------- JOB SCRAPING (unchanged) ----------
+# ---------- JOB SOURCES (unchanged, using the env‑provided keys) ----------
 def fetch_all_users():
     resp = pb("GET", "/collections/users/records")
     return resp.json().get("items", []) if resp.status_code == 200 else []
@@ -153,10 +155,10 @@ def search_serpapi(query, location="United States", num=10):
         for j in results.get("jobs_results", []):
             desc = j.get("description", "")
             jobs.append({"title": j.get("title"), "company": j.get("company_name"), "description": desc, "location": j.get("location"), "remote": any(w in desc.lower() for w in ["remote","work from home"]), "application_link": j.get("apply_link","") or j.get("share_link",""), "source_url": j.get("share_link",""), "posted_date": j.get("detected_extensions",{}).get("posted_at",""), "match_score": 0})
-        logging.info(f"SerpAPI: {len(jobs)} jobs for '{query}'")
+        logging.info(f"SerpAPI: {len(jobs)} jobs for '{query}' in '{location}'")
         return jobs
     except Exception as e:
-        logging.error(f"SerpAPI: {e}")
+        logging.error(f"SerpAPI error: {e}")
         return []
 
 def search_adzuna(query, location="United States", num=10):
@@ -214,7 +216,7 @@ def normalize_and_deduplicate(jobs):
     return unique
 
 def insert_jobs_if_new(jobs):
-    """Insert jobs and return a list of the newly created record IDs."""
+    """Insert jobs and return list of new record IDs."""
     inserted_ids = []
     for job in jobs:
         if not job["title"]: continue
@@ -223,13 +225,12 @@ def insert_jobs_if_new(jobs):
         if resp.status_code == 200 and resp.json()["totalItems"] == 0:
             create_resp = pb("POST", "/collections/job_listings/records", json_data=job)
             if create_resp.status_code == 200:
-                new_id = create_resp.json()["id"]
-                inserted_ids.append(new_id)
+                inserted_ids.append(create_resp.json()["id"])
         time.sleep(0.05)
-    logging.info(f"Inserted {len(inserted_ids)} new jobs")
+    logging.info(f"Inserted {len(inserted_ids)} new jobs out of {len(jobs)}")
     return inserted_ids
 
-# ---------- SEARCH REQUESTS PROCESSING ----------
+# ---------- SEARCH REQUEST PROCESSOR ----------
 def process_search_requests():
     while True:
         try:
@@ -239,12 +240,12 @@ def process_search_requests():
                 continue
             for req in resp.json().get("items", []):
                 req_id = req["id"]
-                user_id = req["user"]
                 raw_query = req["query"]
+                logging.info(f"Processing search request {req_id}: '{raw_query}'")
                 pb("PATCH", f"/collections/job_search_requests/records/{req_id}", json_data={"status":"running"})
                 params = parse_natural_query(raw_query)
                 query, location = build_structured_search(params)
-                logging.info(f"Search request {req_id}: parsed query='{query}', location='{location}'")
+                logging.info(f"Final search: query='{query}', location='{location}'")
                 all_jobs = []
                 all_jobs.extend(search_serpapi(query, location, num=15))
                 all_jobs.extend(search_adzuna(query, location, num=15))
@@ -281,4 +282,3 @@ if __name__ == "__main__":
     threading.Thread(target=fast_chat_loop, daemon=True).start()
     threading.Thread(target=process_search_requests, daemon=True).start()
     scraping_loop()
-# fresh deploy Sat Jul 25 18:30:31 UTC 2026
