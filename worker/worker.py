@@ -243,3 +243,4 @@ if __name__ == "__main__":
     t2.start()
     logging.info("Worker threads started. Entering scraping loop.")
     scraping_loop()
+# Final worker activation Sun Jul 26 14:09:04 UTC 2026
