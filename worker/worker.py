@@ -6,7 +6,6 @@ from serpapi import GoogleSearch
 POCKETBASE_URL = "http://localhost:8090"
 POCKETBASE_ADMIN_TOKEN = os.getenv("POCKETBASE_ADMIN_TOKEN")
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
-MISTRAL_AGENT_ID = os.getenv("MISTRAL_AGENT_ID", "")   # can be empty
 SERPAPI_KEY = os.getenv("SERPAPI_KEY")
 ADZUNA_APP_ID = os.getenv("ADZUNA_APP_ID")
 ADZUNA_APP_KEY = os.getenv("ADZUNA_APP_KEY")
@@ -53,103 +52,71 @@ JSON:"""
         logging.error(f"Query parsing failed: {e}")
         return {"title": raw_query, "location": None, "remote": False, "company": None, "additional_filters": None}
 
-# ---------- MISTRAL WEB SEARCH (method 1: Agent, method 2: tool) ----------
-def search_mistral_web(title, location, num_results=20):
-    """Try agent first, then fallback to built‑in web search tool."""
-    jobs = []
-    # Attempt 1: Agent (if ID is set)
-    if MISTRAL_AGENT_ID:
-        jobs = _search_via_agent(title, location, num_results)
-        if jobs:
-            return jobs
-    # Attempt 2: Built‑in web search tool
-    jobs = _search_via_web_tool(title, location, num_results)
-    if jobs:
-        return jobs
-    # Ultimate fallback: return empty list (other sources will still work)
-    logging.warning("Mistral web search produced 0 jobs, continuing with other sources")
-    return []
+# ---------- COUNTRY LOOKUP FOR ADZUNA ----------
+COUNTRY_MAP = {
+    "united states": "us", "usa": "us", "us": "us",
+    "canada": "ca", "ca": "ca",
+    "united kingdom": "gb", "uk": "gb", "gb": "gb",
+    "australia": "au", "au": "au",
+    "germany": "de", "de": "de",
+    "switzerland": "ch", "ch": "ch",
+    "france": "fr", "fr": "fr",
+    "netherlands": "nl", "nl": "nl",
+    "italy": "it", "it": "it",
+    "spain": "es", "es": "es",
+    "brazil": "br", "br": "br",
+    "india": "in", "in": "in",
+    "mexico": "mx", "mx": "mx",
+}
 
-def _search_via_agent(title, location, num_results):
+def get_adzuna_country(location):
+    """Map a location string to an Adzuna country code. Returns None if not found."""
+    if not location:
+        return None
+    loc = location.lower().strip()
+    # Direct match
+    if loc in COUNTRY_MAP:
+        return COUNTRY_MAP[loc]
+    # Partial match: check if any known country appears in the location string
+    for name, code in COUNTRY_MAP.items():
+        if name in loc:
+            return code
+    return None
+
+def search_adzuna_country(query, location, country_code, num=15):
+    """Use Adzuna API for a specific country."""
+    if not ADZUNA_APP_ID or not ADZUNA_APP_KEY:
+        return []
     try:
-        prompt = f"""
-Search the web for real, current job postings for "{title}" in {location}.
-Return ONLY a JSON array of job objects with these keys: title, company, location, description (max 300 chars), application_link, remote.
-"""
-        resp = requests.post(
-            "https://api.mistral.ai/v1/conversations",
-            headers={"Content-Type": "application/json", "Authorization": f"Bearer {MISTRAL_API_KEY}"},
-            json={"agent_id": MISTRAL_AGENT_ID, "agent_version": 4, "inputs": [{"role":"user","content":prompt}]},
-            timeout=60
-        )
-        if resp.status_code != 200:
-            logging.error(f"Agent API error {resp.status_code}: {resp.text}")
-            return []
+        url = f"https://api.adzuna.com/v1/api/jobs/{country_code}/search/1"
+        params = {
+            "app_id": ADZUNA_APP_ID,
+            "app_key": ADZUNA_APP_KEY,
+            "what": query,
+            "where": location,
+            "max_days_old": 30,
+            "results_per_page": min(num, 50)
+        }
+        resp = requests.get(url, params=params)
         data = resp.json()
-        for msg in reversed(data.get("messages", [])):
-            if msg.get("role") == "assistant":
-                content = msg.get("content", "")
-                if content.startswith("```"):
-                    content = content.split("\n", 1)[1].rsplit("\n", 1)[0]
-                jobs = json.loads(content)
-                logging.info(f"Agent found {len(jobs)} jobs")
-                return _normalize_jobs(jobs)
-        return []
+        jobs = []
+        for r in data.get("results", []):
+            jobs.append({
+                "title": r.get("title"),
+                "company": r.get("company", {}).get("display_name", ""),
+                "description": strip_html(r.get("description", "")),
+                "location": r.get("location", {}).get("display_name", ""),
+                "remote": False,
+                "application_link": r.get("redirect_url", ""),
+                "source_url": r.get("redirect_url", ""),
+                "posted_date": r.get("created", ""),
+                "match_score": 0
+            })
+        logging.info(f"Adzuna ({country_code}): {len(jobs)} jobs for '{query}' in '{location}'")
+        return jobs
     except Exception as e:
-        logging.error(f"Agent search failed: {e}")
+        logging.error(f"Adzuna ({country_code}) error: {e}")
         return []
-
-def _search_via_web_tool(title, location, num_results):
-    """Use mistral-large-latest with the built‑in web_search tool."""
-    prompt = f"""
-Search the web for real, current job postings for "{title}" in {location}.
-Return ONLY a JSON array of job objects with these keys: title, company, location, description (max 300 chars), application_link, remote.
-"""
-    try:
-        # Try using the web_search tool (the official Mistral way)
-        resp = ai.chat.completions.create(
-            model="mistral-large-latest",
-            messages=[{"role":"user","content":prompt}],
-            temperature=0.1,
-            max_tokens=2000,
-            tools=[{"type": "web_search"}],
-            tool_choice="auto"
-        )
-        # The response might include a tool call; extract the final answer
-        content = resp.choices[0].message.content.strip()
-        if not content:
-            # Fallback: check if there's a tool call result
-            if resp.choices[0].message.tool_calls:
-                # The assistant may have used the tool; we need the final response after tool execution.
-                # The OpenAI client doesn't automatically chain tool calls; we need to handle.
-                # For simplicity, we'll manually call the tool? Too complex.
-                # Instead, we'll log and return empty.
-                logging.warning("Web search tool returned no direct content")
-                return []
-        if content.startswith("```"):
-            content = content.split("\n", 1)[1].rsplit("\n", 1)[0]
-        jobs = json.loads(content)
-        logging.info(f"Web search tool found {len(jobs)} jobs")
-        return _normalize_jobs(jobs)
-    except Exception as e:
-        logging.error(f"Web search tool failed: {e}")
-        return []
-
-def _normalize_jobs(raw_jobs):
-    results = []
-    for j in raw_jobs:
-        results.append({
-            "title": j.get("title", ""),
-            "company": j.get("company", ""),
-            "description": strip_html(j.get("description", "")),
-            "location": j.get("location", ""),
-            "remote": j.get("remote", False),
-            "application_link": j.get("application_link", ""),
-            "source_url": j.get("application_link", ""),
-            "posted_date": "",
-            "match_score": 0
-        })
-    return results
 
 # ---------- OTHER SOURCES (unchanged) ----------
 def search_serpapi(query, location="United States", num=15):
@@ -166,21 +133,6 @@ def search_serpapi(query, location="United States", num=15):
         return jobs
     except Exception as e:
         logging.error(f"SerpAPI error: {e}")
-        return []
-
-def search_adzuna(query, location="United States", num=15):
-    if not ADZUNA_APP_ID or not ADZUNA_APP_KEY: return []
-    try:
-        params = {"app_id": ADZUNA_APP_ID, "app_key": ADZUNA_APP_KEY, "what": query, "where": location, "max_days_old": 30, "results_per_page": min(num, 50)}
-        resp = requests.get("https://api.adzuna.com/v1/api/jobs/us/search/1", params=params)
-        data = resp.json()
-        jobs = []
-        for r in data.get("results", []):
-            jobs.append({"title": r.get("title"), "company": r.get("company",{}).get("display_name",""), "description": strip_html(r.get("description","")), "location": r.get("location",{}).get("display_name",""), "remote": False, "application_link": r.get("redirect_url",""), "source_url": r.get("redirect_url",""), "posted_date": r.get("created",""), "match_score": 0})
-        logging.info(f"Adzuna: {len(jobs)} jobs for '{query}'")
-        return jobs
-    except Exception as e:
-        logging.error(f"Adzuna error: {e}")
         return []
 
 def search_remotive(query, num=15):
@@ -228,11 +180,16 @@ def location_match(job, desired_location):
 
 def agentic_job_search(title, location, num_per_source=15):
     all_jobs = []
-    # 1. Mistral web search (agent or tool)
-    all_jobs.extend(search_mistral_web(title, location, num_results=num_per_source))
-    # 2. SerpAPI, Adzuna, Remotive, RemoteOK
+    # 1. SerpAPI (Google Jobs) – already location-aware
     all_jobs.extend(search_serpapi(f"{title} {location}", location, num=num_per_source))
-    all_jobs.extend(search_adzuna(title, location, num=num_per_source))
+    # 2. Adzuna – try country-specific, fallback to US
+    country_code = get_adzuna_country(location)
+    if country_code:
+        all_jobs.extend(search_adzuna_country(title, location, country_code, num=num_per_source))
+    else:
+        # Default US Adzuna
+        all_jobs.extend(search_adzuna_country(title, location, "us", num=num_per_source))
+    # 3. Remote job boards
     all_jobs.extend(search_remotive(title, num=num_per_source))
     all_jobs.extend(search_remoteok(title, num=num_per_source))
     unique = normalize_and_deduplicate(all_jobs)
