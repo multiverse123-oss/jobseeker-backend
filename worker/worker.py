@@ -1,4 +1,4 @@
-import os, time, logging, json, threading, traceback
+import os, time, logging, json, threading, traceback, re
 import requests
 from openai import OpenAI
 from serpapi import GoogleSearch
@@ -11,8 +11,8 @@ ADZUNA_APP_ID = os.getenv("ADZUNA_APP_ID")
 ADZUNA_APP_KEY = os.getenv("ADZUNA_APP_KEY")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-if not POCKETBASE_ADMIN_TOKEN: raise Exception("Missing POCKETBASE_ADMIN_TOKEN env var")
-if not MISTRAL_API_KEY: raise Exception("Missing MISTRAL_API_KEY env var")
+if not POCKETBASE_ADMIN_TOKEN: raise Exception("Missing POCKETBASE_ADMIN_TOKEN")
+if not MISTRAL_API_KEY: raise Exception("Missing MISTRAL_API_KEY")
 
 ai = OpenAI(api_key=MISTRAL_API_KEY, base_url="https://api.mistral.ai/v1")
 
@@ -20,6 +20,12 @@ def pb(method, path, json_data=None):
     url = f"{POCKETBASE_URL}/api/{path.lstrip('/')}"
     headers = {"Authorization": f"Bearer {POCKETBASE_ADMIN_TOKEN}"}
     return requests.request(method, url, headers=headers, json=json_data)
+
+# ---------- HTML STRIPPER ----------
+def strip_html(text):
+    clean = re.sub(r'<[^>]+>', '', text)           # remove all HTML tags
+    clean = re.sub(r'\s+', ' ', clean)              # collapse whitespace
+    return clean.strip()
 
 # ---------- AI QUERY PARSER ----------
 def parse_natural_query(raw_query):
@@ -58,7 +64,7 @@ def build_structured_search(params):
     query = " ".join(filter(None, parts)).strip()
     return query, location if location else "United States"
 
-# ---------- JOB SOURCES ----------
+# ---------- JOB SOURCES (with HTML stripping) ----------
 def search_serpapi(query, location="United States", num=10):
     if not SERPAPI_KEY: return []
     try:
@@ -67,7 +73,7 @@ def search_serpapi(query, location="United States", num=10):
         results = search.get_dict()
         jobs = []
         for j in results.get("jobs_results", []):
-            desc = j.get("description", "")
+            desc = strip_html(j.get("description", ""))
             jobs.append({"title": j.get("title"), "company": j.get("company_name"), "description": desc, "location": j.get("location"), "remote": any(w in desc.lower() for w in ["remote","work from home"]), "application_link": j.get("apply_link","") or j.get("share_link",""), "source_url": j.get("share_link",""), "posted_date": j.get("detected_extensions",{}).get("posted_at",""), "match_score": 0})
         logging.info(f"SerpAPI: {len(jobs)} jobs for '{query}' in '{location}'")
         return jobs
@@ -82,7 +88,7 @@ def search_remotive(query, num=10):
         data = resp.json()
         jobs = []
         for j in data.get("jobs",[])[:num]:
-            jobs.append({"title": j["title"], "company": j["company_name"], "description": j.get("description",""), "location": j.get("candidate_required_location",""), "remote": True, "application_link": j.get("url",""), "source_url": j.get("url",""), "posted_date": j.get("publication_date",""), "match_score": 0})
+            jobs.append({"title": j["title"], "company": j["company_name"], "description": strip_html(j.get("description","")), "location": j.get("candidate_required_location",""), "remote": True, "application_link": j.get("url",""), "source_url": j.get("url",""), "posted_date": j.get("publication_date",""), "match_score": 0})
         logging.info(f"Remotive: {len(jobs)} jobs for '{query}'")
         return jobs
     except Exception as e:
@@ -96,7 +102,7 @@ def search_remoteok(query, num=10):
         data = resp.json()
         jobs = []
         for j in data[1:]:
-            jobs.append({"title": j.get("position",""), "company": j.get("company",""), "description": j.get("description",""), "location": j.get("location",""), "remote": True, "application_link": j.get("url",""), "source_url": j.get("url",""), "posted_date": j.get("epoch",""), "match_score": 0})
+            jobs.append({"title": j.get("position",""), "company": j.get("company",""), "description": strip_html(j.get("description","")), "location": j.get("location",""), "remote": True, "application_link": j.get("url",""), "source_url": j.get("url",""), "posted_date": j.get("epoch",""), "match_score": 0})
         logging.info(f"RemoteOK: {len(jobs)} jobs for '{query}'")
         return jobs[:num]
     except Exception as e:
@@ -111,23 +117,28 @@ def normalize_and_deduplicate(jobs):
         key = f"{job['title']}|{job.get('company','')}|{job.get('source_url','')}"
         if key in seen: continue
         seen.add(key)
-        unique.append({"title": job["title"], "company": job.get("company",""), "description": job.get("description",""), "location": job.get("location",""), "remote": job.get("remote", False), "application_link": job.get("application_link",""), "source_url": job.get("source_url",""), "posted_date": job.get("posted_date",""), "match_score": 0})
+        unique.append(job)
     return unique
 
+# ---------- LOCATION FILTER ----------
+def filter_by_location(jobs, desired_location):
+    if not desired_location:
+        return jobs
+    # Keep only jobs whose location string contains the desired location (case-insensitive)
+    filtered = [j for j in jobs if desired_location.lower() in j.get("location","").lower()]
+    logging.info(f"Location filter '{desired_location}': kept {len(filtered)} out of {len(jobs)}")
+    return filtered
+
 def insert_or_get_ids(jobs):
-    """Insert new jobs and return IDs for all jobs (new + existing)."""
     all_ids = []
     for job in jobs:
         if not job["title"]: continue
-        # Check if this exact job already exists
         filter_str = f"(title='{job['title']}'&&company='{job['company']}'&&source_url='{job['source_url']}')"
         resp = pb("GET", f"/collections/job_listings/records?filter={filter_str}")
         if resp.status_code == 200 and resp.json()["totalItems"] > 0:
-            # Job exists: get its ID
             existing_id = resp.json()["items"][0]["id"]
             all_ids.append(existing_id)
         else:
-            # Insert new job
             create_resp = pb("POST", "/collections/job_listings/records", json_data=job)
             if create_resp.status_code == 200:
                 all_ids.append(create_resp.json()["id"])
@@ -157,6 +168,9 @@ def process_search_requests():
                 all_jobs.extend(search_remotive(query, num=15))
                 all_jobs.extend(search_remoteok(query, num=15))
                 unique = normalize_and_deduplicate(all_jobs)
+                # Filter by desired location
+                if params.get("location"):
+                    unique = filter_by_location(unique, params["location"])
                 job_ids = insert_or_get_ids(unique)
                 pb("PATCH", f"/collections/job_search_requests/records/{req_id}", json_data={"status":"completed", "results": job_ids})
                 logging.info(f"Search request {req_id} completed, returned {len(job_ids)} jobs")
