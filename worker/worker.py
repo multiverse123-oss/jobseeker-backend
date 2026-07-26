@@ -52,35 +52,62 @@ JSON:"""
         logging.error(f"Query parsing failed: {e}")
         return {"title": raw_query, "location": None, "remote": False, "company": None, "additional_filters": None}
 
-# ---------- AGENTIC SEARCH VARIANT GENERATOR ----------
-def generate_search_variants(title, location, remote=False):
-    """Use Mistral to generate 3‑5 alternative search phrases for a broader search."""
-    prompt = f"""Given a job search query, generate 3 to 5 alternative search phrases that would return similar or related jobs. Return ONLY a JSON array of strings, no other text.
+# ---------- MISTRAL WEB SEARCH (Agentic, Location‑Aware) ----------
+def search_mistral_web(query, location, num_results=20):
+    """
+    Use Mistral-large-latest with web_search enabled.
+    Prompts the model to return a JSON array of job listings.
+    """
+    prompt = f"""
+Search the web for real, current job postings for "{query}" in {location}. 
+Return ONLY a JSON array of job objects. Each object must have:
+- title: the job title (string)
+- company: the company name (string)
+- location: the job's location (string)
+- description: a short description (string, max 300 chars)
+- application_link: the URL where to apply (string)
+- remote: true if remote, false otherwise
 
-Original query: job title="{title}", location="{location}", remote={remote}
-
-Example: if title="software engineer" and location="Canada", you might return ["senior software developer Canada", "full stack developer Canada remote", "software engineer jobs Toronto", "IT jobs Canada", "programmer Canada"]
-
-Now generate for the given query."""
+If no jobs are found, return an empty array [].
+Do NOT include any other text, only the JSON array.
+"""
     try:
         resp = ai.chat.completions.create(
-            model="mistral-small-latest",
+            model="mistral-large-latest",
             messages=[{"role":"user","content":prompt}],
-            temperature=0.7, max_tokens=300
+            temperature=0.1,
+            max_tokens=2000,
+            tools=[{"type": "web_search"}],
+            tool_choice="auto"
         )
+        # The response may contain a tool call; we need to extract the assistant's reply
+        # With openai>=1.0 and web_search tool, the result is typically returned as a normal message after tool processing.
+        # The Python client handles it automatically.
         content = resp.choices[0].message.content.strip()
         if content.startswith("```"):
             content = content.split("\n", 1)[1].rsplit("\n", 1)[0]
-        variants = json.loads(content)
-        if isinstance(variants, list):
-            logging.info(f"Generated {len(variants)} search variants: {variants}")
-            return variants
+        jobs = json.loads(content)
+        logging.info(f"Mistral Web Search: {len(jobs)} jobs for '{query}' in '{location}'")
+        # Ensure each job has required fields
+        results = []
+        for j in jobs:
+            results.append({
+                "title": j.get("title", ""),
+                "company": j.get("company", ""),
+                "description": strip_html(j.get("description", "")),
+                "location": j.get("location", ""),
+                "remote": j.get("remote", False),
+                "application_link": j.get("application_link", ""),
+                "source_url": j.get("application_link", ""),
+                "posted_date": "",
+                "match_score": 0
+            })
+        return results
     except Exception as e:
-        logging.error(f"Variant generation failed: {e}")
-    # Fallback: just use the original title + location
-    return [f"{title} {location}"]
+        logging.error(f"Mistral web search error: {e}")
+        return []
 
-# ---------- JOB SOURCES (with HTML stripping) ----------
+# ---------- JOB SOURCES (unchanged) ----------
 def search_serpapi(query, location="United States", num=20):
     if not SERPAPI_KEY: return []
     try:
@@ -137,45 +164,35 @@ def normalize_and_deduplicate(jobs):
     return unique
 
 def location_relevance(job, desired_location):
-    """Score how well a job matches the desired location. 1.0 = exact, 0.0 = no match."""
     if not desired_location:
-        return 0.5  # neutral
+        return 0.5
     job_loc = job.get("location", "").lower()
     desired = desired_location.lower()
     if desired in job_loc:
         return 1.0
-    # Also check if description mentions location (for remote jobs)
     desc = job.get("description", "").lower()
     if desired in desc:
         return 0.8
-    # If remote job and no location info, give a slight penalty
     if job.get("remote", False):
         return 0.3
     return 0.0
 
 def agentic_job_search(title, location, num_per_source=20):
-    """Perform multi‑variant search and return a list of jobs ranked by relevance."""
     all_jobs = []
-    # Generate alternative phrases
-    variants = generate_search_variants(title, location)
-    # Also include the original phrase
-    variants.append(f"{title} {location}")
-    # Remove duplicates in variants
-    variants = list(dict.fromkeys(variants))
-    for phrase in variants[:6]:  # limit to 6 variants to avoid rate limits
-        all_jobs.extend(search_serpapi(phrase, location, num=num_per_source))
-        all_jobs.extend(search_remotive(phrase, num=num_per_source))
-        all_jobs.extend(search_remoteok(phrase, num=num_per_source))
-        time.sleep(0.5)  # gentle delay between variants
+    # First, use Mistral web search for precise local results
+    all_jobs.extend(search_mistral_web(title, location, num_results=num_per_source))
+    # Then add SerpAPI, Remotive, RemoteOK
+    all_jobs.extend(search_serpapi(f"{title} {location}", location, num=num_per_source))
+    all_jobs.extend(search_remotive(title, num=num_per_source))
+    all_jobs.extend(search_remoteok(title, num=num_per_source))
     unique = normalize_and_deduplicate(all_jobs)
-    # Score and sort by relevance to location, then by title
+    # Score and sort by relevance to location
     for job in unique:
         job["_score"] = location_relevance(job, location)
     unique.sort(key=lambda j: j["_score"], reverse=True)
-    # Remove the temporary score field
     for job in unique:
         del job["_score"]
-    logging.info(f"Agentic search: {len(unique)} unique jobs after variants.")
+    logging.info(f"Agentic search: {len(unique)} unique jobs after all sources.")
     return unique
 
 def insert_or_get_ids(jobs):
@@ -211,7 +228,6 @@ def process_search_requests():
                 params = parse_natural_query(raw_query)
                 title = params.get("title") or raw_query
                 location = params.get("location") or "United States"
-                # Agentic search with multiple variants and location ranking
                 jobs = agentic_job_search(title, location, num_per_source=20)
                 job_ids = insert_or_get_ids(jobs)
                 pb("PATCH", f"/collections/job_search_requests/records/{req_id}", json_data={"status":"completed", "results": job_ids})
