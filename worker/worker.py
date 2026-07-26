@@ -113,18 +113,18 @@ def search_remoteok(query, num=15):
         return []
 
 def search_mistral_web(query, location, num_results=20):
-    """Use Mistral-large with web_search to find exact local jobs."""
+    """Use Mistral-large with native web search enabled."""
     prompt = f"""
 Search the web for real, current job postings for "{query}" in {location}. 
 Return ONLY a JSON array of job objects. Each object must have:
 - title: the job title (string)
 - company: the company name (string)
-- location: the job's location (must be in {location})
+- location: the job's location (string)
 - description: a short description (string, max 300 chars)
 - application_link: the URL where to apply (string)
 - remote: true if remote, otherwise false
 
-If no jobs are found in {location}, return an empty array [].
+If no jobs are found, return an empty array [].
 Do NOT include any other text, only the JSON array.
 """
     try:
@@ -133,8 +133,7 @@ Do NOT include any other text, only the JSON array.
             messages=[{"role":"user","content":prompt}],
             temperature=0.1,
             max_tokens=2000,
-            tools=[{"type": "web_search"}],
-            tool_choice="auto"
+            extra_body={"web_search": True}   # <-- correct way to enable web search
         )
         content = resp.choices[0].message.content.strip()
         if content.startswith("```"):
@@ -170,13 +169,20 @@ def normalize_and_deduplicate(jobs):
         unique.append(job)
     return unique
 
-# ---------- STRICT LOCATION FILTER ----------
-def filter_by_location(jobs, desired_location):
+# ---------- SMART LOCATION SCORING (never returns zero) ----------
+def location_relevance(job, desired_location):
     if not desired_location:
-        return jobs
-    filtered = [j for j in jobs if desired_location.lower() in j.get("location","").lower()]
-    logging.info(f"Strict location filter '{desired_location}': kept {len(filtered)} out of {len(jobs)}")
-    return filtered
+        return 0.5
+    job_loc = job.get("location", "").lower()
+    desired = desired_location.lower()
+    if desired in job_loc:
+        return 1.0
+    desc = job.get("description", "").lower()
+    if desired in desc:
+        return 0.8
+    if job.get("remote", False):
+        return 0.3
+    return 0.0
 
 def agentic_job_search(title, location, num_per_source=15):
     all_jobs = []
@@ -186,11 +192,16 @@ def agentic_job_search(title, location, num_per_source=15):
     all_jobs.extend(search_remotive(title, num=num_per_source))
     all_jobs.extend(search_remoteok(title, num=num_per_source))
     unique = normalize_and_deduplicate(all_jobs)
-    # Apply strict location filter if location is specified
-    if location and location != "United States":
-        unique = filter_by_location(unique, location)
-    logging.info(f"Agentic search: {len(unique)} jobs after filtering.")
-    return unique
+    # Score each job by location relevance, then sort best first
+    for job in unique:
+        job["_score"] = location_relevance(job, location)
+    unique.sort(key=lambda j: j["_score"], reverse=True)
+    # Keep top 100 jobs (or all if less)
+    top = unique[:100]
+    for job in top:
+        del job["_score"]
+    logging.info(f"Agentic search: {len(top)} jobs returned (scored by location).")
+    return top
 
 def insert_or_get_ids(jobs):
     all_ids = []
