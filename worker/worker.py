@@ -6,6 +6,7 @@ from serpapi import GoogleSearch
 POCKETBASE_URL = "http://localhost:8090"
 POCKETBASE_ADMIN_TOKEN = os.getenv("POCKETBASE_ADMIN_TOKEN")
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
+MISTRAL_AGENT_ID = os.getenv("MISTRAL_AGENT_ID", "ag_019bb7bc205071f5affbbf15ad8be61a")
 SERPAPI_KEY = os.getenv("SERPAPI_KEY")
 ADZUNA_APP_ID = os.getenv("ADZUNA_APP_ID")
 ADZUNA_APP_KEY = os.getenv("ADZUNA_APP_KEY")
@@ -26,7 +27,7 @@ def strip_html(text):
     clean = re.sub(r'\s+', ' ', clean)
     return clean.strip()
 
-# ---------- AI QUERY PARSER ----------
+# ---------- AI QUERY PARSER (unchanged) ----------
 def parse_natural_query(raw_query):
     prompt = f"""Extract the key job search parameters from the following user query. Return ONLY a valid JSON object with these keys (use null if not mentioned):
 - title: the job title or keywords (string)
@@ -52,7 +53,58 @@ JSON:"""
         logging.error(f"Query parsing failed: {e}")
         return {"title": raw_query, "location": None, "remote": False, "company": None, "additional_filters": None}
 
-# ---------- ALL JOB SOURCES ----------
+# ---------- MISTRAL AGENT SEARCH (primary, heavy web search) ----------
+def search_mistral_agent(title, location, num_results=20):
+    """
+    Use the Mistral Agent with native web search to find real job postings.
+    The agent is configured to return structured JSON.
+    """
+    prompt = f"""
+Search the web for current, real job postings for "{title}" in {location}.
+Return ONLY a JSON array of job objects. Each object must have these exact keys:
+- title: the job title (string)
+- company: the company name (string)
+- location: the job's location (string)
+- description: a short description (max 300 chars)
+- application_link: the URL where to apply (string)
+- remote: true if remote, otherwise false
+
+Only include jobs that are actually located in {location}. If no jobs are found, return an empty array [].
+Do NOT include any other text or explanations.
+"""
+    try:
+        # Use the agent completions endpoint
+        resp = ai.chat.completions.create(
+            model=MISTRAL_AGENT_ID,          # agent ID as model
+            messages=[{"role":"user","content":prompt}],
+            temperature=0.1,
+            max_tokens=2000
+            # The agent automatically handles web_search when prompted
+        )
+        content = resp.choices[0].message.content.strip()
+        if content.startswith("```"):
+            content = content.split("\n", 1)[1].rsplit("\n", 1)[0]
+        jobs = json.loads(content)
+        logging.info(f"Mistral Agent: {len(jobs)} jobs for '{title}' in '{location}'")
+        results = []
+        for j in jobs:
+            results.append({
+                "title": j.get("title", ""),
+                "company": j.get("company", ""),
+                "description": strip_html(j.get("description", "")),
+                "location": j.get("location", ""),
+                "remote": j.get("remote", False),
+                "application_link": j.get("application_link", ""),
+                "source_url": j.get("application_link", ""),
+                "posted_date": "",
+                "match_score": 0
+            })
+        return results
+    except Exception as e:
+        logging.error(f"Mistral Agent error: {e}")
+        return []
+
+# ---------- EXISTING JOB SOURCES (unchanged) ----------
 def search_serpapi(query, location="United States", num=15):
     if not SERPAPI_KEY: return []
     try:
@@ -112,52 +164,6 @@ def search_remoteok(query, num=15):
         logging.error(f"RemoteOK: {e}")
         return []
 
-def search_mistral_web(query, location, num_results=20):
-    """Use Mistral-large with native web search enabled."""
-    prompt = f"""
-Search the web for real, current job postings for "{query}" in {location}. 
-Return ONLY a JSON array of job objects. Each object must have:
-- title: the job title (string)
-- company: the company name (string)
-- location: the job's location (string)
-- description: a short description (string, max 300 chars)
-- application_link: the URL where to apply (string)
-- remote: true if remote, otherwise false
-
-If no jobs are found, return an empty array [].
-Do NOT include any other text, only the JSON array.
-"""
-    try:
-        resp = ai.chat.completions.create(
-            model="mistral-large-latest",
-            messages=[{"role":"user","content":prompt}],
-            temperature=0.1,
-            max_tokens=2000,
-            extra_body={"web_search": True}   # <-- correct way to enable web search
-        )
-        content = resp.choices[0].message.content.strip()
-        if content.startswith("```"):
-            content = content.split("\n", 1)[1].rsplit("\n", 1)[0]
-        jobs = json.loads(content)
-        logging.info(f"Mistral Web Search: {len(jobs)} jobs for '{query}' in '{location}'")
-        results = []
-        for j in jobs:
-            results.append({
-                "title": j.get("title", ""),
-                "company": j.get("company", ""),
-                "description": strip_html(j.get("description", "")),
-                "location": j.get("location", ""),
-                "remote": j.get("remote", False),
-                "application_link": j.get("application_link", ""),
-                "source_url": j.get("application_link", ""),
-                "posted_date": "",
-                "match_score": 0
-            })
-        return results
-    except Exception as e:
-        logging.error(f"Mistral web search error: {e}")
-        return []
-
 def normalize_and_deduplicate(jobs):
     seen = set()
     unique = []
@@ -169,39 +175,26 @@ def normalize_and_deduplicate(jobs):
         unique.append(job)
     return unique
 
-# ---------- SMART LOCATION SCORING (never returns zero) ----------
-def location_relevance(job, desired_location):
-    if not desired_location:
-        return 0.5
-    job_loc = job.get("location", "").lower()
-    desired = desired_location.lower()
-    if desired in job_loc:
-        return 1.0
-    desc = job.get("description", "").lower()
-    if desired in desc:
-        return 0.8
-    if job.get("remote", False):
-        return 0.3
-    return 0.0
+def location_match(job, desired_location):
+    if not desired_location: return False
+    return desired_location.lower() in job.get("location", "").lower()
 
 def agentic_job_search(title, location, num_per_source=15):
     all_jobs = []
-    all_jobs.extend(search_mistral_web(title, location, num_results=num_per_source))
+    # 1. Mistral Agent – heavy, precise web search
+    all_jobs.extend(search_mistral_agent(title, location, num_results=num_per_source))
+    # 2. SerpAPI, Adzuna, Remotive, RemoteOK
     all_jobs.extend(search_serpapi(f"{title} {location}", location, num=num_per_source))
     all_jobs.extend(search_adzuna(title, location, num=num_per_source))
     all_jobs.extend(search_remotive(title, num=num_per_source))
     all_jobs.extend(search_remoteok(title, num=num_per_source))
     unique = normalize_and_deduplicate(all_jobs)
-    # Score each job by location relevance, then sort best first
-    for job in unique:
-        job["_score"] = location_relevance(job, location)
-    unique.sort(key=lambda j: j["_score"], reverse=True)
-    # Keep top 100 jobs (or all if less)
-    top = unique[:100]
-    for job in top:
-        del job["_score"]
-    logging.info(f"Agentic search: {len(top)} jobs returned (scored by location).")
-    return top
+    # Separate exact location matches from others
+    exact = [j for j in unique if location_match(j, location)]
+    others = [j for j in unique if not location_match(j, location)]
+    combined = exact + others[:max(0, 100 - len(exact))]
+    logging.info(f"Agentic search: {len(exact)} exact matches, {len(combined)} total returned.")
+    return combined, len(exact)
 
 def insert_or_get_ids(jobs):
     all_ids = []
@@ -216,7 +209,6 @@ def insert_or_get_ids(jobs):
             if create_resp.status_code == 200:
                 all_ids.append(create_resp.json()["id"])
         time.sleep(0.05)
-    logging.info(f"Returned {len(all_ids)} job IDs")
     return all_ids
 
 def process_search_requests():
@@ -235,10 +227,14 @@ def process_search_requests():
                 params = parse_natural_query(raw_query)
                 title = params.get("title") or raw_query
                 location = params.get("location") or "United States"
-                jobs = agentic_job_search(title, location, num_per_source=15)
+                jobs, exact_count = agentic_job_search(title, location, num_per_source=15)
                 job_ids = insert_or_get_ids(jobs)
-                pb("PATCH", f"/collections/job_search_requests/records/{req_id}", json_data={"status":"completed", "results": job_ids})
-                logging.info(f"Search request {req_id} completed, returned {len(job_ids)} jobs")
+                pb("PATCH", f"/collections/job_search_requests/records/{req_id}", json_data={
+                    "status": "completed",
+                    "results": job_ids,
+                    "exact_match_count": exact_count
+                })
+                logging.info(f"Search request {req_id} completed, {len(job_ids)} jobs, {exact_count} exact")
         except Exception as e:
             logging.error(f"Search request loop error: {e}")
             traceback.print_exc()
