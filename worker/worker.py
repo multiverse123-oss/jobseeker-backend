@@ -21,10 +21,9 @@ def pb(method, path, json_data=None):
     headers = {"Authorization": f"Bearer {POCKETBASE_ADMIN_TOKEN}"}
     return requests.request(method, url, headers=headers, json=json_data)
 
-# ---------- HTML STRIPPER ----------
 def strip_html(text):
-    clean = re.sub(r'<[^>]+>', '', text)           # remove all HTML tags
-    clean = re.sub(r'\s+', ' ', clean)              # collapse whitespace
+    clean = re.sub(r'<[^>]+>', '', text)
+    clean = re.sub(r'\s+', ' ', clean)
     return clean.strip()
 
 # ---------- AI QUERY PARSER ----------
@@ -53,19 +52,36 @@ JSON:"""
         logging.error(f"Query parsing failed: {e}")
         return {"title": raw_query, "location": None, "remote": False, "company": None, "additional_filters": None}
 
-def build_structured_search(params):
-    title = params.get("title") or ""
-    location = params.get("location") or ""
-    remote = params.get("remote", False)
-    company = params.get("company") or ""
-    extra = params.get("additional_filters") or ""
-    parts = [title, company, extra]
-    if remote: parts.append("remote")
-    query = " ".join(filter(None, parts)).strip()
-    return query, location if location else "United States"
+# ---------- AGENTIC SEARCH VARIANT GENERATOR ----------
+def generate_search_variants(title, location, remote=False):
+    """Use Mistral to generate 3‑5 alternative search phrases for a broader search."""
+    prompt = f"""Given a job search query, generate 3 to 5 alternative search phrases that would return similar or related jobs. Return ONLY a JSON array of strings, no other text.
+
+Original query: job title="{title}", location="{location}", remote={remote}
+
+Example: if title="software engineer" and location="Canada", you might return ["senior software developer Canada", "full stack developer Canada remote", "software engineer jobs Toronto", "IT jobs Canada", "programmer Canada"]
+
+Now generate for the given query."""
+    try:
+        resp = ai.chat.completions.create(
+            model="mistral-small-latest",
+            messages=[{"role":"user","content":prompt}],
+            temperature=0.7, max_tokens=300
+        )
+        content = resp.choices[0].message.content.strip()
+        if content.startswith("```"):
+            content = content.split("\n", 1)[1].rsplit("\n", 1)[0]
+        variants = json.loads(content)
+        if isinstance(variants, list):
+            logging.info(f"Generated {len(variants)} search variants: {variants}")
+            return variants
+    except Exception as e:
+        logging.error(f"Variant generation failed: {e}")
+    # Fallback: just use the original title + location
+    return [f"{title} {location}"]
 
 # ---------- JOB SOURCES (with HTML stripping) ----------
-def search_serpapi(query, location="United States", num=10):
+def search_serpapi(query, location="United States", num=20):
     if not SERPAPI_KEY: return []
     try:
         params = {"engine": "google_jobs", "q": query, "location": location, "hl": "en", "api_key": SERPAPI_KEY, "num": num}
@@ -81,7 +97,7 @@ def search_serpapi(query, location="United States", num=10):
         logging.error(f"SerpAPI error: {e}")
         return []
 
-def search_remotive(query, num=10):
+def search_remotive(query, num=20):
     try:
         url = f"https://remotive.com/api/remote-jobs?search={query}"
         resp = requests.get(url)
@@ -95,7 +111,7 @@ def search_remotive(query, num=10):
         logging.error(f"Remotive: {e}")
         return []
 
-def search_remoteok(query, num=10):
+def search_remoteok(query, num=20):
     try:
         url = f"https://remoteok.com/api?search={query}"
         resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"})
@@ -120,14 +136,47 @@ def normalize_and_deduplicate(jobs):
         unique.append(job)
     return unique
 
-# ---------- LOCATION FILTER ----------
-def filter_by_location(jobs, desired_location):
+def location_relevance(job, desired_location):
+    """Score how well a job matches the desired location. 1.0 = exact, 0.0 = no match."""
     if not desired_location:
-        return jobs
-    # Keep only jobs whose location string contains the desired location (case-insensitive)
-    filtered = [j for j in jobs if desired_location.lower() in j.get("location","").lower()]
-    logging.info(f"Location filter '{desired_location}': kept {len(filtered)} out of {len(jobs)}")
-    return filtered
+        return 0.5  # neutral
+    job_loc = job.get("location", "").lower()
+    desired = desired_location.lower()
+    if desired in job_loc:
+        return 1.0
+    # Also check if description mentions location (for remote jobs)
+    desc = job.get("description", "").lower()
+    if desired in desc:
+        return 0.8
+    # If remote job and no location info, give a slight penalty
+    if job.get("remote", False):
+        return 0.3
+    return 0.0
+
+def agentic_job_search(title, location, num_per_source=20):
+    """Perform multi‑variant search and return a list of jobs ranked by relevance."""
+    all_jobs = []
+    # Generate alternative phrases
+    variants = generate_search_variants(title, location)
+    # Also include the original phrase
+    variants.append(f"{title} {location}")
+    # Remove duplicates in variants
+    variants = list(dict.fromkeys(variants))
+    for phrase in variants[:6]:  # limit to 6 variants to avoid rate limits
+        all_jobs.extend(search_serpapi(phrase, location, num=num_per_source))
+        all_jobs.extend(search_remotive(phrase, num=num_per_source))
+        all_jobs.extend(search_remoteok(phrase, num=num_per_source))
+        time.sleep(0.5)  # gentle delay between variants
+    unique = normalize_and_deduplicate(all_jobs)
+    # Score and sort by relevance to location, then by title
+    for job in unique:
+        job["_score"] = location_relevance(job, location)
+    unique.sort(key=lambda j: j["_score"], reverse=True)
+    # Remove the temporary score field
+    for job in unique:
+        del job["_score"]
+    logging.info(f"Agentic search: {len(unique)} unique jobs after variants.")
+    return unique
 
 def insert_or_get_ids(jobs):
     all_ids = []
@@ -136,14 +185,13 @@ def insert_or_get_ids(jobs):
         filter_str = f"(title='{job['title']}'&&company='{job['company']}'&&source_url='{job['source_url']}')"
         resp = pb("GET", f"/collections/job_listings/records?filter={filter_str}")
         if resp.status_code == 200 and resp.json()["totalItems"] > 0:
-            existing_id = resp.json()["items"][0]["id"]
-            all_ids.append(existing_id)
+            all_ids.append(resp.json()["items"][0]["id"])
         else:
             create_resp = pb("POST", "/collections/job_listings/records", json_data=job)
             if create_resp.status_code == 200:
                 all_ids.append(create_resp.json()["id"])
         time.sleep(0.05)
-    logging.info(f"Returned {len(all_ids)} job IDs (new + existing)")
+    logging.info(f"Returned {len(all_ids)} job IDs")
     return all_ids
 
 # ---------- SEARCH REQUEST PROCESSOR ----------
@@ -161,17 +209,11 @@ def process_search_requests():
                 logging.info(f"Processing search request {req_id}: '{raw_query}'")
                 pb("PATCH", f"/collections/job_search_requests/records/{req_id}", json_data={"status":"running"})
                 params = parse_natural_query(raw_query)
-                query, location = build_structured_search(params)
-                logging.info(f"Final search: query='{query}', location='{location}'")
-                all_jobs = []
-                all_jobs.extend(search_serpapi(query, location, num=15))
-                all_jobs.extend(search_remotive(query, num=15))
-                all_jobs.extend(search_remoteok(query, num=15))
-                unique = normalize_and_deduplicate(all_jobs)
-                # Filter by desired location
-                if params.get("location"):
-                    unique = filter_by_location(unique, params["location"])
-                job_ids = insert_or_get_ids(unique)
+                title = params.get("title") or raw_query
+                location = params.get("location") or "United States"
+                # Agentic search with multiple variants and location ranking
+                jobs = agentic_job_search(title, location, num_per_source=20)
+                job_ids = insert_or_get_ids(jobs)
                 pb("PATCH", f"/collections/job_search_requests/records/{req_id}", json_data={"status":"completed", "results": job_ids})
                 logging.info(f"Search request {req_id} completed, returned {len(job_ids)} jobs")
         except Exception as e:
