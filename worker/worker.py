@@ -12,9 +12,6 @@ ADZUNA_APP_ID = os.getenv("ADZUNA_APP_ID")
 ADZUNA_APP_KEY = os.getenv("ADZUNA_APP_KEY")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-logging.info(f"POCKETBASE_ADMIN_TOKEN loaded: {bool(POCKETBASE_ADMIN_TOKEN)}")
-logging.info(f"MISTRAL_API_KEY loaded: {bool(MISTRAL_API_KEY)}")
-logging.info(f"SERPAPI_KEY loaded: {bool(SERPAPI_KEY)}")
 
 if not POCKETBASE_ADMIN_TOKEN:
     raise Exception("Missing POCKETBASE_ADMIN_TOKEN env var")
@@ -139,7 +136,29 @@ def insert_jobs_if_new(jobs):
     logging.info(f"Inserted {len(inserted_ids)} new jobs out of {len(jobs)}")
     return inserted_ids
 
-# ---------- SEARCH REQUEST PROCESSOR ----------
+def query_existing_jobs(title, location=None):
+    """Return IDs of existing jobs that match the given title and optional location."""
+    filters = []
+    if title:
+        filters.append(f"title ~ '{title}'")
+    if location:
+        filters.append(f"location ~ '{location}'")
+    filter_str = " && ".join(filters) if filters else ""
+    ids = []
+    page = 1
+    while True:
+        resp = pb("GET", f"/collections/job_listings/records?filter={filter_str}&page={page}&perPage=100&fields=id")
+        if resp.status_code != 200:
+            break
+        data = resp.json()
+        items = data.get("items", [])
+        ids.extend(item["id"] for item in items)
+        if len(items) < 100:
+            break
+        page += 1
+        time.sleep(0.2)
+    return ids
+
 def process_search_requests():
     logging.info("Search request processor thread started.")
     while True:
@@ -156,14 +175,19 @@ def process_search_requests():
                 params = parse_natural_query(raw_query)
                 query, location = build_structured_search(params)
                 logging.info(f"Final search: query='{query}', location='{location}'")
+                # Scrape new jobs from the internet
                 all_jobs = []
                 all_jobs.extend(search_serpapi(query, location, num=15))
                 all_jobs.extend(search_remotive(query, num=15))
                 all_jobs.extend(search_remoteok(query, num=15))
                 unique = normalize_and_deduplicate(all_jobs)
                 new_ids = insert_jobs_if_new(unique)
-                pb("PATCH", f"/collections/job_search_requests/records/{req_id}", json_data={"status":"completed", "results": new_ids})
-                logging.info(f"Search request {req_id} completed, {len(new_ids)} new jobs")
+                # Also find existing jobs in the database that match the parsed title/location
+                existing_ids = query_existing_jobs(params.get("title"), params.get("location"))
+                # Combine (new first, then existing) and remove duplicates
+                combined = list(dict.fromkeys(new_ids + existing_ids))
+                pb("PATCH", f"/collections/job_search_requests/records/{req_id}", json_data={"status":"completed", "results": combined})
+                logging.info(f"Search request {req_id} completed, {len(new_ids)} new, {len(existing_ids)} existing, total returned {len(combined)}")
         except Exception as e:
             logging.error(f"Search request loop error: {e}")
             traceback.print_exc()
@@ -185,10 +209,10 @@ def fast_chat_loop():
                 profile = ""
                 if user:
                     profile = f"User profile: skills={user.get('skills','')}, desired job={user.get('desired_job_title','')}"
-                history = ""   # simplified for now
+                history = ""
                 full_prompt = f"""
 You are a helpful, friendly, and knowledgeable career coach and interview trainer.
-Your name is JobSeeker AI Coach.
+Your name is JobSeeker AI Coach. You remember all previous conversations with this user.
 
 {profile}
 
@@ -243,4 +267,3 @@ if __name__ == "__main__":
     t2.start()
     logging.info("Worker threads started. Entering scraping loop.")
     scraping_loop()
-# Final worker activation Sun Jul 26 14:09:04 UTC 2026
