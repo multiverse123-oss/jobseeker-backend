@@ -3,7 +3,6 @@ import requests
 from openai import OpenAI
 from serpapi import GoogleSearch
 
-# ---------- KEYS FROM ENVIRONMENT ----------
 POCKETBASE_URL = "http://localhost:8090"
 POCKETBASE_ADMIN_TOKEN = os.getenv("POCKETBASE_ADMIN_TOKEN")
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
@@ -12,11 +11,8 @@ ADZUNA_APP_ID = os.getenv("ADZUNA_APP_ID")
 ADZUNA_APP_KEY = os.getenv("ADZUNA_APP_KEY")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-
-if not POCKETBASE_ADMIN_TOKEN:
-    raise Exception("Missing POCKETBASE_ADMIN_TOKEN env var")
-if not MISTRAL_API_KEY:
-    raise Exception("Missing MISTRAL_API_KEY env var")
+if not POCKETBASE_ADMIN_TOKEN: raise Exception("Missing POCKETBASE_ADMIN_TOKEN env var")
+if not MISTRAL_API_KEY: raise Exception("Missing MISTRAL_API_KEY env var")
 
 ai = OpenAI(api_key=MISTRAL_API_KEY, base_url="https://api.mistral.ai/v1")
 
@@ -41,15 +37,12 @@ JSON:"""
         resp = ai.chat.completions.create(
             model="mistral-small-latest",
             messages=[{"role":"user","content":prompt}],
-            temperature=0.1,
-            max_tokens=200
+            temperature=0.1, max_tokens=200
         )
         content = resp.choices[0].message.content.strip()
         if content.startswith("```"):
             content = content.split("\n", 1)[1].rsplit("\n", 1)[0]
-        params = json.loads(content)
-        logging.info(f"Parsed query '{raw_query}' -> {params}")
-        return params
+        return json.loads(content)
     except Exception as e:
         logging.error(f"Query parsing failed: {e}")
         return {"title": raw_query, "location": None, "remote": False, "company": None, "additional_filters": None}
@@ -60,10 +53,9 @@ def build_structured_search(params):
     remote = params.get("remote", False)
     company = params.get("company") or ""
     extra = params.get("additional_filters") or ""
-    query_parts = [title, company, extra]
-    if remote:
-        query_parts.append("remote")
-    query = " ".join(filter(None, query_parts)).strip()
+    parts = [title, company, extra]
+    if remote: parts.append("remote")
+    query = " ".join(filter(None, parts)).strip()
     return query, location if location else "United States"
 
 # ---------- JOB SOURCES ----------
@@ -122,43 +114,28 @@ def normalize_and_deduplicate(jobs):
         unique.append({"title": job["title"], "company": job.get("company",""), "description": job.get("description",""), "location": job.get("location",""), "remote": job.get("remote", False), "application_link": job.get("application_link",""), "source_url": job.get("source_url",""), "posted_date": job.get("posted_date",""), "match_score": 0})
     return unique
 
-def insert_jobs_if_new(jobs):
-    inserted_ids = []
+def insert_or_get_ids(jobs):
+    """Insert new jobs and return IDs for all jobs (new + existing)."""
+    all_ids = []
     for job in jobs:
         if not job["title"]: continue
+        # Check if this exact job already exists
         filter_str = f"(title='{job['title']}'&&company='{job['company']}'&&source_url='{job['source_url']}')"
         resp = pb("GET", f"/collections/job_listings/records?filter={filter_str}")
-        if resp.status_code == 200 and resp.json()["totalItems"] == 0:
+        if resp.status_code == 200 and resp.json()["totalItems"] > 0:
+            # Job exists: get its ID
+            existing_id = resp.json()["items"][0]["id"]
+            all_ids.append(existing_id)
+        else:
+            # Insert new job
             create_resp = pb("POST", "/collections/job_listings/records", json_data=job)
             if create_resp.status_code == 200:
-                inserted_ids.append(create_resp.json()["id"])
+                all_ids.append(create_resp.json()["id"])
         time.sleep(0.05)
-    logging.info(f"Inserted {len(inserted_ids)} new jobs out of {len(jobs)}")
-    return inserted_ids
+    logging.info(f"Returned {len(all_ids)} job IDs (new + existing)")
+    return all_ids
 
-def query_existing_jobs(title, location=None):
-    """Return IDs of existing jobs that match the given title and optional location."""
-    filters = []
-    if title:
-        filters.append(f"title ~ '{title}'")
-    if location:
-        filters.append(f"location ~ '{location}'")
-    filter_str = " && ".join(filters) if filters else ""
-    ids = []
-    page = 1
-    while True:
-        resp = pb("GET", f"/collections/job_listings/records?filter={filter_str}&page={page}&perPage=100&fields=id")
-        if resp.status_code != 200:
-            break
-        data = resp.json()
-        items = data.get("items", [])
-        ids.extend(item["id"] for item in items)
-        if len(items) < 100:
-            break
-        page += 1
-        time.sleep(0.2)
-    return ids
-
+# ---------- SEARCH REQUEST PROCESSOR ----------
 def process_search_requests():
     logging.info("Search request processor thread started.")
     while True:
@@ -175,19 +152,14 @@ def process_search_requests():
                 params = parse_natural_query(raw_query)
                 query, location = build_structured_search(params)
                 logging.info(f"Final search: query='{query}', location='{location}'")
-                # Scrape new jobs from the internet
                 all_jobs = []
                 all_jobs.extend(search_serpapi(query, location, num=15))
                 all_jobs.extend(search_remotive(query, num=15))
                 all_jobs.extend(search_remoteok(query, num=15))
                 unique = normalize_and_deduplicate(all_jobs)
-                new_ids = insert_jobs_if_new(unique)
-                # Also find existing jobs in the database that match the parsed title/location
-                existing_ids = query_existing_jobs(params.get("title"), params.get("location"))
-                # Combine (new first, then existing) and remove duplicates
-                combined = list(dict.fromkeys(new_ids + existing_ids))
-                pb("PATCH", f"/collections/job_search_requests/records/{req_id}", json_data={"status":"completed", "results": combined})
-                logging.info(f"Search request {req_id} completed, {len(new_ids)} new, {len(existing_ids)} existing, total returned {len(combined)}")
+                job_ids = insert_or_get_ids(unique)
+                pb("PATCH", f"/collections/job_search_requests/records/{req_id}", json_data={"status":"completed", "results": job_ids})
+                logging.info(f"Search request {req_id} completed, returned {len(job_ids)} jobs")
         except Exception as e:
             logging.error(f"Search request loop error: {e}")
             traceback.print_exc()
@@ -206,29 +178,18 @@ def fast_chat_loop():
                 user_id = msg["user"]
                 text = msg["message"]
                 user = pb("GET", f"/collections/users/records/{user_id}").json()
-                profile = ""
-                if user:
-                    profile = f"User profile: skills={user.get('skills','')}, desired job={user.get('desired_job_title','')}"
-                history = ""
-                full_prompt = f"""
-You are a helpful, friendly, and knowledgeable career coach and interview trainer.
-Your name is JobSeeker AI Coach. You remember all previous conversations with this user.
-
+                profile = f"User profile: skills={user.get('skills','')}, desired job={user.get('desired_job_title','')}" if user else ""
+                prompt = f"""
+You are a helpful, friendly, and knowledgeable career coach.
 {profile}
-
-Conversation history:
-{history if history else 'No previous conversation.'}
-
-The user just said: "{text}"
-
-Respond helpfully, keeping the context of the conversation.
+User: {text}
+Respond helpfully.
 """
                 try:
                     resp_ai = ai.chat.completions.create(
                         model="mistral-small-latest",
-                        messages=[{"role":"user","content":full_prompt}],
-                        temperature=0.7,
-                        max_tokens=300
+                        messages=[{"role":"user","content":prompt}],
+                        temperature=0.7, max_tokens=300
                     )
                     answer = resp_ai.choices[0].message.content.strip()
                     pb("PATCH", f"/collections/chat_messages/records/{msg_id}", json_data={"response": answer})
@@ -241,7 +202,6 @@ Respond helpfully, keeping the context of the conversation.
         time.sleep(10)
 
 def scraping_loop():
-    logging.info("Background scraping thread started.")
     while True:
         users = pb("GET", "/collections/users/records").json().get("items", [])
         for user in users:
@@ -254,16 +214,13 @@ def scraping_loop():
             jobs.extend(search_remotive(query, num=10))
             jobs.extend(search_remoteok(query, num=10))
             unique = normalize_and_deduplicate(jobs)
-            insert_jobs_if_new(unique)
+            insert_or_get_ids(unique)
             time.sleep(2)
         logging.info("Scraping cycle complete. Sleeping 10 minutes.")
         time.sleep(600)
 
 if __name__ == "__main__":
     logging.info("Starting JobSeeker worker threads...")
-    t1 = threading.Thread(target=fast_chat_loop, daemon=True)
-    t2 = threading.Thread(target=process_search_requests, daemon=True)
-    t1.start()
-    t2.start()
-    logging.info("Worker threads started. Entering scraping loop.")
+    threading.Thread(target=fast_chat_loop, daemon=True).start()
+    threading.Thread(target=process_search_requests, daemon=True).start()
     scraping_loop()
