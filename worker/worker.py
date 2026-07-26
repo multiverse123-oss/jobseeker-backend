@@ -70,21 +70,17 @@ COUNTRY_MAP = {
 }
 
 def get_adzuna_country(location):
-    """Map a location string to an Adzuna country code. Returns None if not found."""
     if not location:
         return None
     loc = location.lower().strip()
-    # Direct match
     if loc in COUNTRY_MAP:
         return COUNTRY_MAP[loc]
-    # Partial match: check if any known country appears in the location string
     for name, code in COUNTRY_MAP.items():
         if name in loc:
             return code
     return None
 
 def search_adzuna_country(query, location, country_code, num=15):
-    """Use Adzuna API for a specific country."""
     if not ADZUNA_APP_ID or not ADZUNA_APP_KEY:
         return []
     try:
@@ -118,7 +114,7 @@ def search_adzuna_country(query, location, country_code, num=15):
         logging.error(f"Adzuna ({country_code}) error: {e}")
         return []
 
-# ---------- OTHER SOURCES (unchanged) ----------
+# ---------- OTHER SOURCES ----------
 def search_serpapi(query, location="United States", num=15):
     if not SERPAPI_KEY: return []
     try:
@@ -163,6 +159,62 @@ def search_remoteok(query, num=15):
         logging.error(f"RemoteOK: {e}")
         return []
 
+# ---------- MISTRAL LARGE WEB SEARCH (NEW BONUS SOURCE) ----------
+def search_mistral_large_web(title, location, num=15):
+    """Use mistral-large-latest with web_search tool to find jobs."""
+    try:
+        prompt = f"""
+Search the web for real, current job postings for "{title}" in {location}.
+Return ONLY a JSON array of job objects. Each object must have these exact keys:
+- title: the job title (string)
+- company: the company name (string)
+- location: the job's location (string)
+- description: a short description (max 300 chars)
+- application_link: the URL where to apply (string)
+- remote: true if remote, otherwise false
+
+Only include jobs that are actually located in {location}. If no jobs are found, return an empty array [].
+Do NOT include any other text or explanations.
+"""
+        resp = ai.chat.completions.create(
+            model="mistral-large-latest",
+            messages=[{"role":"user","content":prompt}],
+            temperature=0.1,
+            max_tokens=2000,
+            tools=[{"type": "web_search"}],
+            tool_choice="auto"
+        )
+        # The response may have tool_calls or direct content.
+        # Usually Mistral returns the final answer in the message content after using the tool.
+        content = resp.choices[0].message.content.strip()
+        if not content:
+            # If content is empty, maybe the model wants to use tools? Check for tool_calls
+            if resp.choices[0].message.tool_calls:
+                # Not handling complex tool execution here; just log and skip.
+                logging.warning("Mistral Large web search returned tool calls instead of content")
+                return []
+        if content.startswith("```"):
+            content = content.split("\n", 1)[1].rsplit("\n", 1)[0]
+        jobs = json.loads(content)
+        logging.info(f"Mistral Large Web: {len(jobs)} jobs for '{title}' in '{location}'")
+        results = []
+        for j in jobs:
+            results.append({
+                "title": j.get("title", ""),
+                "company": j.get("company", ""),
+                "description": strip_html(j.get("description", "")),
+                "location": j.get("location", ""),
+                "remote": j.get("remote", False),
+                "application_link": j.get("application_link", ""),
+                "source_url": j.get("application_link", ""),
+                "posted_date": "",
+                "match_score": 0
+            })
+        return results
+    except Exception as e:
+        logging.error(f"Mistral Large Web error: {e}")
+        return []
+
 def normalize_and_deduplicate(jobs):
     seen = set()
     unique = []
@@ -180,18 +232,19 @@ def location_match(job, desired_location):
 
 def agentic_job_search(title, location, num_per_source=15):
     all_jobs = []
-    # 1. SerpAPI (Google Jobs) – already location-aware
+    # 1. SerpAPI (Google Jobs)
     all_jobs.extend(search_serpapi(f"{title} {location}", location, num=num_per_source))
-    # 2. Adzuna – try country-specific, fallback to US
+    # 2. Adzuna – country‑specific
     country_code = get_adzuna_country(location)
     if country_code:
         all_jobs.extend(search_adzuna_country(title, location, country_code, num=num_per_source))
     else:
-        # Default US Adzuna
         all_jobs.extend(search_adzuna_country(title, location, "us", num=num_per_source))
     # 3. Remote job boards
     all_jobs.extend(search_remotive(title, num=num_per_source))
     all_jobs.extend(search_remoteok(title, num=num_per_source))
+    # 4. **NEW** Mistral Large with web search (bonus)
+    all_jobs.extend(search_mistral_large_web(title, location, num=num_per_source))
     unique = normalize_and_deduplicate(all_jobs)
     exact = [j for j in unique if location_match(j, location)]
     others = [j for j in unique if not location_match(j, location)]
