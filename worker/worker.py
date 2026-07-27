@@ -9,6 +9,9 @@ MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
 SERPAPI_KEY = os.getenv("SERPAPI_KEY")
 ADZUNA_APP_ID = os.getenv("ADZUNA_APP_ID")
 ADZUNA_APP_KEY = os.getenv("ADZUNA_APP_KEY")
+FINDWORK_KEY = os.getenv("FINDWORK_KEY")
+RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY")
+JSEARCH_HOST = "jsearch.p.rapidapi.com"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 if not POCKETBASE_ADMIN_TOKEN: raise Exception("Missing POCKETBASE_ADMIN_TOKEN")
@@ -26,7 +29,7 @@ def strip_html(text):
     clean = re.sub(r'\s+', ' ', clean)
     return clean.strip()
 
-# ---------- AI QUERY PARSER ----------
+# ---------- AI QUERY PARSER (unchanged) ----------
 def parse_natural_query(raw_query):
     prompt = f"""Extract the key job search parameters from the following user query. Return ONLY a valid JSON object with these keys (use null if not mentioned):
 - title: the job title or keywords (string)
@@ -52,6 +55,26 @@ JSON:"""
         logging.error(f"Query parsing failed: {e}")
         return {"title": raw_query, "location": None, "remote": False, "company": None, "additional_filters": None}
 
+# ---------- AI JOB TITLE GENERATOR ----------
+def generate_job_titles(location, count=8):
+    prompt = f"""List {count} of the most common job titles that people search for when looking for employment in {location}. 
+Return ONLY a JSON array of strings, no other text. Example: ["software engineer", "nurse", "teacher", "driver", "accountant"]"""
+    try:
+        resp = ai.chat.completions.create(
+            model="mistral-small-latest",
+            messages=[{"role":"user","content":prompt}],
+            temperature=0.7, max_tokens=300
+        )
+        content = resp.choices[0].message.content.strip()
+        if content.startswith("```"):
+            content = content.split("\n", 1)[1].rsplit("\n", 1)[0]
+        titles = json.loads(content)
+        logging.info(f"Generated {len(titles)} job titles for {location}: {titles}")
+        return titles[:count]
+    except Exception as e:
+        logging.error(f"Job title generation failed: {e}")
+        return []
+
 # ---------- COUNTRY LOOKUP FOR ADZUNA ----------
 COUNTRY_MAP = {
     "united states": "us", "usa": "us", "us": "us",
@@ -70,52 +93,15 @@ COUNTRY_MAP = {
 }
 
 def get_adzuna_country(location):
-    if not location:
-        return None
+    if not location: return None
     loc = location.lower().strip()
-    if loc in COUNTRY_MAP:
-        return COUNTRY_MAP[loc]
+    if loc in COUNTRY_MAP: return COUNTRY_MAP[loc]
     for name, code in COUNTRY_MAP.items():
-        if name in loc:
-            return code
+        if name in loc: return code
     return None
 
-def search_adzuna_country(query, location, country_code, num=15):
-    if not ADZUNA_APP_ID or not ADZUNA_APP_KEY:
-        return []
-    try:
-        url = f"https://api.adzuna.com/v1/api/jobs/{country_code}/search/1"
-        params = {
-            "app_id": ADZUNA_APP_ID,
-            "app_key": ADZUNA_APP_KEY,
-            "what": query,
-            "where": location,
-            "max_days_old": 30,
-            "results_per_page": min(num, 50)
-        }
-        resp = requests.get(url, params=params)
-        data = resp.json()
-        jobs = []
-        for r in data.get("results", []):
-            jobs.append({
-                "title": r.get("title"),
-                "company": r.get("company", {}).get("display_name", ""),
-                "description": strip_html(r.get("description", "")),
-                "location": r.get("location", {}).get("display_name", ""),
-                "remote": False,
-                "application_link": r.get("redirect_url", ""),
-                "source_url": r.get("redirect_url", ""),
-                "posted_date": r.get("created", ""),
-                "match_score": 0
-            })
-        logging.info(f"Adzuna ({country_code}): {len(jobs)} jobs for '{query}' in '{location}'")
-        return jobs
-    except Exception as e:
-        logging.error(f"Adzuna ({country_code}) error: {e}")
-        return []
-
-# ---------- OTHER SOURCES ----------
-def search_serpapi(query, location="United States", num=15):
+# ---------- INDIVIDUAL SOURCES ----------
+def search_serpapi(query, location="United States", num=10):
     if not SERPAPI_KEY: return []
     try:
         params = {"engine": "google_jobs", "q": query, "location": location, "hl": "en", "api_key": SERPAPI_KEY, "num": num}
@@ -125,16 +111,31 @@ def search_serpapi(query, location="United States", num=15):
         for j in results.get("jobs_results", []):
             desc = strip_html(j.get("description", ""))
             jobs.append({"title": j.get("title"), "company": j.get("company_name"), "description": desc, "location": j.get("location"), "remote": any(w in desc.lower() for w in ["remote","work from home"]), "application_link": j.get("apply_link","") or j.get("share_link",""), "source_url": j.get("share_link",""), "posted_date": j.get("detected_extensions",{}).get("posted_at",""), "match_score": 0})
-        logging.info(f"SerpAPI: {len(jobs)} jobs for '{query}' in '{location}'")
+        logging.info(f"SerpAPI: {len(jobs)} jobs for '{query}'")
         return jobs
     except Exception as e:
         logging.error(f"SerpAPI error: {e}")
         return []
 
-def search_remotive(query, num=15):
+def search_adzuna_country(query, location, country_code, num=10):
+    if not ADZUNA_APP_ID or not ADZUNA_APP_KEY: return []
     try:
-        url = f"https://remotive.com/api/remote-jobs?search={query}"
-        resp = requests.get(url)
+        url = f"https://api.adzuna.com/v1/api/jobs/{country_code}/search/1"
+        params = {"app_id": ADZUNA_APP_ID, "app_key": ADZUNA_APP_KEY, "what": query, "where": location, "max_days_old": 30, "results_per_page": min(num, 50)}
+        resp = requests.get(url, params=params)
+        data = resp.json()
+        jobs = []
+        for r in data.get("results", []):
+            jobs.append({"title": r.get("title"), "company": r.get("company", {}).get("display_name", ""), "description": strip_html(r.get("description", "")), "location": r.get("location", {}).get("display_name", ""), "remote": False, "application_link": r.get("redirect_url", ""), "source_url": r.get("redirect_url", ""), "posted_date": r.get("created", ""), "match_score": 0})
+        logging.info(f"Adzuna ({country_code}): {len(jobs)} jobs for '{query}'")
+        return jobs
+    except Exception as e:
+        logging.error(f"Adzuna error: {e}")
+        return []
+
+def search_remotive(query, num=10):
+    try:
+        resp = requests.get(f"https://remotive.com/api/remote-jobs?search={query}")
         data = resp.json()
         jobs = []
         for j in data.get("jobs",[])[:num]:
@@ -142,13 +143,12 @@ def search_remotive(query, num=15):
         logging.info(f"Remotive: {len(jobs)} jobs for '{query}'")
         return jobs
     except Exception as e:
-        logging.error(f"Remotive: {e}")
+        logging.error(f"Remotive error: {e}")
         return []
 
-def search_remoteok(query, num=15):
+def search_remoteok(query, num=10):
     try:
-        url = f"https://remoteok.com/api?search={query}"
-        resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"})
+        resp = requests.get(f"https://remoteok.com/api?search={query}", headers={"User-Agent": "Mozilla/5.0"})
         data = resp.json()
         jobs = []
         for j in data[1:]:
@@ -156,63 +156,94 @@ def search_remoteok(query, num=15):
         logging.info(f"RemoteOK: {len(jobs)} jobs for '{query}'")
         return jobs[:num]
     except Exception as e:
-        logging.error(f"RemoteOK: {e}")
+        logging.error(f"RemoteOK error: {e}")
         return []
 
-# ---------- MISTRAL LARGE WEB SEARCH (NEW BONUS SOURCE) ----------
-def search_mistral_large_web(title, location, num=15):
-    """Use mistral-large-latest with web_search tool to find jobs."""
+def search_findwork(query, num=10):
+    if not FINDWORK_KEY: return []
     try:
-        prompt = f"""
-Search the web for real, current job postings for "{title}" in {location}.
-Return ONLY a JSON array of job objects. Each object must have these exact keys:
-- title: the job title (string)
-- company: the company name (string)
-- location: the job's location (string)
-- description: a short description (max 300 chars)
-- application_link: the URL where to apply (string)
-- remote: true if remote, otherwise false
-
-Only include jobs that are actually located in {location}. If no jobs are found, return an empty array [].
-Do NOT include any other text or explanations.
-"""
-        resp = ai.chat.completions.create(
-            model="mistral-large-latest",
-            messages=[{"role":"user","content":prompt}],
-            temperature=0.1,
-            max_tokens=2000,
-            tools=[{"type": "web_search"}],
-            tool_choice="auto"
-        )
-        # The response may have tool_calls or direct content.
-        # Usually Mistral returns the final answer in the message content after using the tool.
-        content = resp.choices[0].message.content.strip()
-        if not content:
-            # If content is empty, maybe the model wants to use tools? Check for tool_calls
-            if resp.choices[0].message.tool_calls:
-                # Not handling complex tool execution here; just log and skip.
-                logging.warning("Mistral Large web search returned tool calls instead of content")
-                return []
-        if content.startswith("```"):
-            content = content.split("\n", 1)[1].rsplit("\n", 1)[0]
-        jobs = json.loads(content)
-        logging.info(f"Mistral Large Web: {len(jobs)} jobs for '{title}' in '{location}'")
-        results = []
-        for j in jobs:
-            results.append({
-                "title": j.get("title", ""),
-                "company": j.get("company", ""),
-                "description": strip_html(j.get("description", "")),
-                "location": j.get("location", ""),
-                "remote": j.get("remote", False),
-                "application_link": j.get("application_link", ""),
-                "source_url": j.get("application_link", ""),
-                "posted_date": "",
-                "match_score": 0
-            })
-        return results
+        resp = requests.get(f"https://findwork.dev/api/jobs/?search={query}", headers={"Authorization": f"Token {FINDWORK_KEY}"})
+        data = resp.json()
+        jobs = []
+        for j in data.get("results", [])[:num]:
+            jobs.append({"title": j["role"], "company": j["company_name"], "description": strip_html(j.get("text","")), "location": j.get("location",""), "remote": j.get("remote", False), "application_link": j.get("url",""), "source_url": j.get("url",""), "posted_date": j.get("date_posted",""), "match_score": 0})
+        logging.info(f"FindWork: {len(jobs)} jobs for '{query}'")
+        return jobs
     except Exception as e:
-        logging.error(f"Mistral Large Web error: {e}")
+        logging.error(f"FindWork error: {e}")
+        return []
+
+def search_jsearch(query, location=None, num=10):
+    if not RAPIDAPI_KEY: return []
+    try:
+        headers = {"X-RapidAPI-Key": RAPIDAPI_KEY, "X-RapidAPI-Host": JSEARCH_HOST}
+        params = {"query": query, "page": "1", "num_pages": "1", "date_posted": "all"}
+        if location: params["location"] = location
+        resp = requests.get("https://jsearch.p.rapidapi.com/search", headers=headers, params=params)
+        data = resp.json()
+        jobs = []
+        for r in data.get("data", []):
+            jobs.append({"title": r.get("job_title"), "company": r.get("employer_name"), "description": strip_html(r.get("job_description","")), "location": f"{r.get('job_city','')}, {r.get('job_country','')}", "remote": r.get("job_is_remote", False), "application_link": r.get("job_apply_link",""), "source_url": r.get("job_google_link",""), "posted_date": r.get("job_posted_at_datetime_utc",""), "match_score": 0})
+        logging.info(f"JSearch: {len(jobs)} jobs for '{query}'")
+        return jobs
+    except Exception as e:
+        logging.error(f"JSearch error: {e}")
+        return []
+
+def search_upwork_rss(query, num=10):
+    try:
+        resp = requests.get(f"https://www.upwork.com/ab/feed/jobs/rss?q={query}", headers={"User-Agent": "Mozilla/5.0"})
+        soup = BeautifulSoup(resp.content, "xml")
+        jobs = []
+        for item in soup.find_all("item")[:num]:
+            jobs.append({"title": item.find("title").text if item.find("title") else "", "company": "Upwork Client", "description": strip_html(item.find("description").text if item.find("description") else ""), "location": "", "remote": True, "application_link": item.find("link").text if item.find("link") else "", "source_url": item.find("link").text if item.find("link") else "", "posted_date": "", "match_score": 0})
+        logging.info(f"Upwork RSS: {len(jobs)} jobs for '{query}'")
+        return jobs
+    except Exception as e:
+        logging.error(f"Upwork RSS error: {e}")
+        return []
+
+def search_reddit_forhire(query, num=10):
+    try:
+        resp = requests.get(f"https://www.reddit.com/r/forhire/search.json?q={query}&restrict_sr=on&sort=new", headers={"User-Agent": "Mozilla/5.0"})
+        data = resp.json()
+        jobs = []
+        for post in data.get("data", {}).get("children", [])[:num]:
+            jobs.append({"title": post["data"]["title"], "company": "Reddit /r/forhire", "description": strip_html(post["data"].get("selftext","")), "location": "", "remote": "remote" in post["data"]["title"].lower(), "application_link": "https://reddit.com" + post["data"]["permalink"], "source_url": "https://reddit.com" + post["data"]["permalink"], "posted_date": "", "match_score": 0})
+        logging.info(f"Reddit: {len(jobs)} jobs for '{query}'")
+        return jobs
+    except Exception as e:
+        logging.error(f"Reddit error: {e}")
+        return []
+
+def search_hackernews(query, num=10):
+    try:
+        resp = requests.get("https://hn.algolia.com/api/v1/search", params={"query": "Ask HN: Who is hiring?", "tags": "story", "hitsPerPage": 50})
+        data = resp.json()
+        jobs = []
+        for hit in data.get("hits", []):
+            if "who is hiring" not in hit.get("title","").lower(): continue
+            if query.lower() in hit.get("story_text","").lower():
+                jobs.append({"title": hit["title"], "company": "Hacker News", "description": strip_html(hit.get("story_text","")[:500]), "location": "", "remote": "remote" in hit.get("story_text","").lower(), "application_link": hit.get("url") or f"https://news.ycombinator.com/item?id={hit['objectID']}", "source_url": f"https://news.ycombinator.com/item?id={hit['objectID']}", "posted_date": hit.get("created_at",""), "match_score": 0})
+        logging.info(f"HackerNews: {len(jobs)} jobs for '{query}'")
+        return jobs[:num]
+    except Exception as e:
+        logging.error(f"HackerNews error: {e}")
+        return []
+
+def search_careerjet(query, location=None, num=10):
+    """Scrape CareerJet RSS (free, no key)."""
+    try:
+        url = f"https://www.careerjet.com/jobs?q={query}&l={location or ''}&format=rss"
+        resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"})
+        soup = BeautifulSoup(resp.content, "xml")
+        jobs = []
+        for item in soup.find_all("item")[:num]:
+            jobs.append({"title": item.find("title").text if item.find("title") else "", "company": item.find("company").text if item.find("company") else "", "description": strip_html(item.find("description").text if item.find("description") else ""), "location": item.find("location").text if item.find("location") else "", "remote": False, "application_link": item.find("link").text if item.find("link") else "", "source_url": item.find("link").text if item.find("link") else "", "posted_date": "", "match_score": 0})
+        logging.info(f"CareerJet: {len(jobs)} jobs for '{query}'")
+        return jobs
+    except Exception as e:
+        logging.error(f"CareerJet error: {e}")
         return []
 
 def normalize_and_deduplicate(jobs):
@@ -230,26 +261,38 @@ def location_match(job, desired_location):
     if not desired_location: return False
     return desired_location.lower() in job.get("location", "").lower()
 
-def agentic_job_search(title, location, num_per_source=15):
+# ---------- ORCHESTRATOR ----------
+def agentic_job_search(title, location, num_per_source=10):
     all_jobs = []
-    # 1. SerpAPI (Google Jobs)
-    all_jobs.extend(search_serpapi(f"{title} {location}", location, num=num_per_source))
-    # 2. Adzuna – country‑specific
-    country_code = get_adzuna_country(location)
-    if country_code:
-        all_jobs.extend(search_adzuna_country(title, location, country_code, num=num_per_source))
-    else:
-        all_jobs.extend(search_adzuna_country(title, location, "us", num=num_per_source))
-    # 3. Remote job boards
-    all_jobs.extend(search_remotive(title, num=num_per_source))
-    all_jobs.extend(search_remoteok(title, num=num_per_source))
-    # 4. **NEW** Mistral Large with web search (bonus)
-    all_jobs.extend(search_mistral_large_web(title, location, num=num_per_source))
+    specific_titles = [title]
+    # If generic, generate specific titles
+    if title.lower() in ("jobs", "job", ""):
+        specific_titles = generate_job_titles(location, count=8)
+        if not specific_titles:
+            specific_titles = [title]
+    # For each title, hit every source
+    for t in specific_titles:
+        query = f"{t} {location}"
+        all_jobs.extend(search_serpapi(query, location, num=num_per_source))
+        country_code = get_adzuna_country(location)
+        if country_code:
+            all_jobs.extend(search_adzuna_country(t, location, country_code, num=num_per_source))
+        else:
+            all_jobs.extend(search_adzuna_country(t, location, "us", num=num_per_source))
+        all_jobs.extend(search_remotive(t, num=num_per_source))
+        all_jobs.extend(search_remoteok(t, num=num_per_source))
+        all_jobs.extend(search_findwork(query, num=num_per_source))
+        all_jobs.extend(search_jsearch(query, location, num=num_per_source))
+        all_jobs.extend(search_upwork_rss(query, num=num_per_source))
+        all_jobs.extend(search_reddit_forhire(query, num=num_per_source))
+        all_jobs.extend(search_hackernews(query, num=num_per_source))
+        all_jobs.extend(search_careerjet(query, location, num=num_per_source))
+        time.sleep(0.3)
     unique = normalize_and_deduplicate(all_jobs)
     exact = [j for j in unique if location_match(j, location)]
     others = [j for j in unique if not location_match(j, location)]
     combined = exact + others[:max(0, 100 - len(exact))]
-    logging.info(f"Agentic search: {len(exact)} exact matches, {len(combined)} total returned.")
+    logging.info(f"Massive search: {len(exact)} exact matches, {len(combined)} total.")
     return combined, len(exact)
 
 def insert_or_get_ids(jobs):
@@ -283,7 +326,7 @@ def process_search_requests():
                 params = parse_natural_query(raw_query)
                 title = params.get("title") or raw_query
                 location = params.get("location") or "United States"
-                jobs, exact_count = agentic_job_search(title, location, num_per_source=15)
+                jobs, exact_count = agentic_job_search(title, location, num_per_source=10)
                 job_ids = insert_or_get_ids(jobs)
                 pb("PATCH", f"/collections/job_search_requests/records/{req_id}", json_data={
                     "status": "completed",
