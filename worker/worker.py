@@ -341,11 +341,13 @@ def normalize_and_deduplicate(jobs):
     return unique
 
 def location_match(job, desired_location):
-    if not desired_location: return False
+    if not desired_location:
+        return False
     loc = job.get("location")
-    if not loc: return False
-    # Normalize: lowercase, strip extra spaces
-    loc_norm = re.sub(r'\s+', ' ', loc.lower().strip())
+    if not loc:
+        return False
+    # Normalize: lowercase, remove commas, collapse spaces
+    loc_norm = re.sub(r'[,\s]+', ' ', loc.lower().strip())
     desired_norm = desired_location.lower().strip()
     return desired_norm in loc_norm
 
