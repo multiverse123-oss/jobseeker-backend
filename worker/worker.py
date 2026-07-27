@@ -70,8 +70,7 @@ Return ONLY a JSON array of strings, no other text. Example: ["software engineer
         content = resp.choices[0].message.content.strip()
         if content.startswith("```"):
             content = content.split("\n", 1)[1].rsplit("\n", 1)[0]
-        titles = json.loads(content)
-        return titles[:count]
+        return json.loads(content)[:count]
     except Exception as e:
         logging.error(f"Job title generation failed: {e}")
         return []
@@ -101,7 +100,7 @@ def get_adzuna_country(location):
         if name in loc: return code
     return None
 
-# ---------- SOURCE FUNCTIONS ----------
+# ---------- ALL SOURCE FUNCTIONS (unchanged) ----------
 def search_serpapi(query, location="United States", num=10):
     if not SERPAPI_KEY: return []
     try:
@@ -246,11 +245,7 @@ def search_careerjet(query, location=None, num=10):
         logging.error(f"CareerJet: {e}")
         return []
 
-SEARXNG_INSTANCES = [
-    "https://searx.be/search",
-    "https://searx.xyz/search",
-    "https://search.sapti.me/search",
-]
+SEARXNG_INSTANCES = ["https://searx.be/search", "https://searx.xyz/search", "https://search.sapti.me/search"]
 
 def search_searxng(query, location=None, num=5):
     jobs = []
@@ -333,7 +328,7 @@ def search_stract(query, location=None, num=10):
         logging.error(f"Stract: {e}")
         return []
 
-# ---------- NORMALIZATION ----------
+# ---------- NORMALIZATION & DEDUP ----------
 def normalize_and_deduplicate(jobs):
     seen = set()
     unique = []
@@ -348,8 +343,11 @@ def normalize_and_deduplicate(jobs):
 def location_match(job, desired_location):
     if not desired_location: return False
     loc = job.get("location")
-    if not loc: return False   # <-- FIX: handle None
-    return desired_location.lower() in loc.lower()
+    if not loc: return False
+    # Normalize: lowercase, strip extra spaces
+    loc_norm = re.sub(r'\s+', ' ', loc.lower().strip())
+    desired_norm = desired_location.lower().strip()
+    return desired_norm in loc_norm
 
 def agentic_job_search(title, location, num_per_source=8):
     all_jobs = []
