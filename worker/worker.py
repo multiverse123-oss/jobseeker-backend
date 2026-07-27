@@ -26,6 +26,7 @@ def pb(method, path, json_data=None):
     return requests.request(method, url, headers=headers, json=json_data)
 
 def strip_html(text):
+    if not text: return ""
     clean = re.sub(r'<[^>]+>', '', text)
     clean = re.sub(r'\s+', ' ', clean)
     return clean.strip()
@@ -70,13 +71,12 @@ Return ONLY a JSON array of strings, no other text. Example: ["software engineer
         if content.startswith("```"):
             content = content.split("\n", 1)[1].rsplit("\n", 1)[0]
         titles = json.loads(content)
-        logging.info(f"Generated {len(titles)} job titles for {location}: {titles}")
         return titles[:count]
     except Exception as e:
         logging.error(f"Job title generation failed: {e}")
         return []
 
-# ---------- COUNTRY LOOKUP FOR ADZUNA ----------
+# ---------- COUNTRY MAP ----------
 COUNTRY_MAP = {
     "united states": "us", "usa": "us", "us": "us",
     "canada": "ca", "ca": "ca",
@@ -246,11 +246,9 @@ def search_careerjet(query, location=None, num=10):
         logging.error(f"CareerJet: {e}")
         return []
 
-# ---------- MULTIPLE SEARXNG INSTANCES ----------
 SEARXNG_INSTANCES = [
     "https://searx.be/search",
     "https://searx.xyz/search",
-    "https://searx.tuxcloud.net/search",
     "https://search.sapti.me/search",
 ]
 
@@ -281,7 +279,6 @@ def search_searxng(query, location=None, num=5):
     logging.info(f"All SearXNG instances: {len(jobs)} jobs for '{query}'")
     return jobs
 
-# ---------- NEW OPEN-SOURCE DEEP SEARCH ENGINES ----------
 def search_metager(query, location=None, num=10):
     try:
         q = f"{query} jobs"
@@ -336,7 +333,7 @@ def search_stract(query, location=None, num=10):
         logging.error(f"Stract: {e}")
         return []
 
-# ---------- NORMALIZATION & DEDUP ----------
+# ---------- NORMALIZATION ----------
 def normalize_and_deduplicate(jobs):
     seen = set()
     unique = []
@@ -350,16 +347,15 @@ def normalize_and_deduplicate(jobs):
 
 def location_match(job, desired_location):
     if not desired_location: return False
-    return desired_location.lower() in job.get("location", "").lower()
+    loc = job.get("location")
+    if not loc: return False   # <-- FIX: handle None
+    return desired_location.lower() in loc.lower()
 
-# ---------- ORCHESTRATOR ----------
 def agentic_job_search(title, location, num_per_source=8):
     all_jobs = []
     specific_titles = [title]
     if title.lower() in ("jobs", "job", ""):
-        specific_titles = generate_job_titles(location, count=8)
-        if not specific_titles:
-            specific_titles = [title]
+        specific_titles = generate_job_titles(location, count=8) or [title]
     for t in specific_titles:
         query = f"{t} {location}"
         all_jobs.extend(search_serpapi(query, location, num_per_source))

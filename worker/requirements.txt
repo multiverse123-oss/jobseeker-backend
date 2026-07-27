@@ -6,3 +6,5 @@ git+https://github.com/cullenwatson/jobspy.git
 playwright
 serpapi
 google-search-results
+beautifulsoup4
+lxml
