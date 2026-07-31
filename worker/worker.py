@@ -100,7 +100,7 @@ def get_adzuna_country(location):
         if name in loc: return code
     return None
 
-# ---------- ALL SOURCE FUNCTIONS (unchanged) ----------
+# ---------- ALL SOURCE FUNCTIONS ----------
 def search_serpapi(query, location="United States", num=10):
     if not SERPAPI_KEY: return []
     try:
@@ -341,13 +341,11 @@ def normalize_and_deduplicate(jobs):
     return unique
 
 def location_match(job, desired_location):
-    if not desired_location:
-        return False
+    if not desired_location: return False
     loc = job.get("location")
-    if not loc:
-        return False
-    # Normalize: lowercase, remove commas, collapse spaces
-    loc_norm = re.sub(r'[,\s]+', ' ', loc.lower().strip())
+    if not loc: return False
+    loc_norm = re.sub(r'[,\-]+', ' ', loc.lower().strip())
+    loc_norm = re.sub(r'\s+', ' ', loc_norm).strip()
     desired_norm = desired_location.lower().strip()
     return desired_norm in loc_norm
 
@@ -425,6 +423,7 @@ def process_search_requests():
             logging.error(f"Search request loop error: {e}")
         time.sleep(10)
 
+# ---------- FAST CHAT LOOP (never crashes) ----------
 def fast_chat_loop():
     while True:
         try:
@@ -432,14 +431,17 @@ def fast_chat_loop():
             if resp.status_code != 200:
                 time.sleep(5)
                 continue
-            for msg in resp.json().get("items", []):
-                msg_id = msg["id"]
-                user_id = msg["user"]
-                text = msg["message"]
-                user = pb("GET", f"/collections/users/records/{user_id}").json()
-                profile = f"User profile: skills={user.get('skills','')}, desired job={user.get('desired_job_title','')}" if user else ""
-                prompt = f"You are a helpful career coach. {profile}\nUser: {text}\nRespond helpfully."
+            messages = resp.json().get("items", [])
+            for msg in messages:
                 try:
+                    msg_id = msg["id"]
+                    user_id = msg["user"]
+                    text = msg["message"]
+                    user = pb("GET", f"/collections/users/records/{user_id}").json()
+                    profile = ""
+                    if user:
+                        profile = f"User profile: skills={user.get('skills','')}, desired job={user.get('desired_job_title','')}"
+                    prompt = f"You are a helpful, friendly, and knowledgeable career coach and interview trainer. {profile}\nUser: {text}\nRespond helpfully."
                     resp_ai = ai.chat.completions.create(
                         model="mistral-small-latest",
                         messages=[{"role":"user","content":prompt}],
@@ -449,8 +451,8 @@ def fast_chat_loop():
                     pb("PATCH", f"/collections/chat_messages/records/{msg_id}", json_data={"response": answer})
                     logging.info(f"Replied to chat {msg_id}")
                 except Exception as e:
-                    logging.error(f"Chat failed: {e}")
-                time.sleep(0.2)
+                    logging.error(f"Chat message failed: {e}")
+                    time.sleep(0.2)
         except Exception as e:
             logging.error(f"Fast chat loop error: {e}")
         time.sleep(10)
