@@ -228,8 +228,8 @@ def fast_chat_loop():
                     user_id = msg["user"]
                     text = msg["message"]
 
-                    # ---- Fetch conversation history (last 10 messages) ----
-                    history_resp = pb("GET", f"/collections/chat_messages/records?filter=(user='{user_id}')&sort=created&perPage=10")
+                    # ---- Fetch conversation history (last 12 messages) ----
+                    history_resp = pb("GET", f"/collections/chat_messages/records?filter=(user='{user_id}')&sort=created&perPage=12")
                     history_items = history_resp.json().get("items", [])
                     dialogue = []
                     for h in history_items:
@@ -237,38 +237,37 @@ def fast_chat_loop():
                             if h["message"]:
                                 dialogue.append(f"User: {h['message']}")
                             if h["response"]:
-                                dialogue.append(f"Assistant: {h['response']}")
-                    history_text = "\n".join(dialogue[-10:])  # last 10 exchanges
+                                dialogue.append(f"Coach: {h['response']}")
+                    history_text = "\n".join(dialogue[-12:])
 
                     # ---- Fetch user profile ----
                     user = pb("GET", f"/collections/users/records/{user_id}").json()
                     profile = ""
                     if user:
                         profile = (
-                            f"User profile:\n"
-                            f"- Name: {user.get('full_name', '')}\n"
-                            f"- Skills: {user.get('skills', '')}\n"
-                            f"- Desired Job: {user.get('desired_job_title', '')}\n"
-                            f"- Location: {user.get('location', '')}\n"
+                            f"Name: {user.get('full_name', '')}\n"
+                            f"Skills: {user.get('skills', '')}\n"
+                            f"Desired Job: {user.get('desired_job_title', '')}\n"
+                            f"Location: {user.get('location', '')}\n"
                         )
 
-                    # ---- Strong system prompt ----
+                    # ---- Conversational prompt ----
                     system = (
-                        "You are JobSeeker AI Coach, an expert career coach and interview trainer. "
-                        "You are warm, encouraging, and give specific, actionable advice. "
-                        "You remember the entire conversation and refer back to earlier topics when relevant. "
-                        "You ask follow-up questions when the user's answer is unclear. "
-                        "Never give generic replies. Always tailor advice to the user's actual situation."
+                        "You are JobSeeker AI Coach, a friendly and knowledgeable career advisor. "
+                        "Always respond directly to the user's latest message. "
+                        "Be natural, ask follow‑up questions, and remember previous exchanges. "
+                        "Never output generic templates, welcome messages, or structured plans unless the user explicitly asks for one."
                     )
 
-                    # ---- Mistral call with full context ----
+                    user_content = f"User profile:\n{profile}\n\nConversation history:\n{history_text}\n\nUser's latest message: {text}"
+
                     ai_resp = ai.chat.completions.create(
                         model="mistral-small-latest",
                         messages=[
                             {"role": "system", "content": system},
-                            {"role": "user", "content": f"{profile}\n\nConversation so far:\n{history_text}\n\nCurrent message: {text}\n\nRespond as the coach."}
+                            {"role": "user", "content": user_content}
                         ],
-                        temperature=0.7,
+                        temperature=0.8,
                         max_tokens=500
                     )
                     answer = ai_resp.choices[0].message.content.strip()
