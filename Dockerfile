@@ -28,6 +28,8 @@ RUN /app/worker-venv/bin/pip install --no-cache-dir -r /app/worker-requirements.
 COPY run.sh /app/run.sh
 COPY litestream.yml /app/litestream.yml
 COPY worker/worker.py /app/worker.py
+COPY worker/supervisor.py /app/supervisor.py
+COPY worker/source_probe.py /app/source_probe.py
 
 RUN chmod +x /app/run.sh && mkdir -p /app/pb_data
 

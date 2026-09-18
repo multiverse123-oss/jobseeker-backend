@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
 echo "=== JobSeeker Backend ==="
 
@@ -26,17 +26,13 @@ PB_PID=$!
 
 sleep 3
 
-# Worker environment
+# Worker environment. Credentials must be supplied by the deployment secret store.
 export POCKETBASE_URL="http://localhost:8090"
-export POCKETBASE_ADMIN_TOKEN="${POCKETBASE_ADMIN_TOKEN:-eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3ODU4MDYwMTAsImlkIjoidzFtN3pna2Z2dG5xbmg5IiwidHlwZSI6ImFkbWluIn0.H0IuaaTm9BUTunuIafPbpF6VBlQzQ_2qihAXfFEcKEI}"
-export MISTRAL_API_KEY="${MISTRAL_API_KEY:-7Y9YTSfAfqL4MEHL6YHPH5BEOlONfVU2}"
+: "${PB_ADMIN_TOKEN:?PB_ADMIN_TOKEN secret is required}"
+: "${MISTRAL_API_KEY:?MISTRAL_API_KEY secret is required}"
+export POCKETBASE_ADMIN_TOKEN="${PB_ADMIN_TOKEN}"
 export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 export PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
 
-echo "[*] Starting JobSeeker AI worker..."
-/app/worker-venv/bin/python /app/worker.py &
-WORKER_PID=$!
-
-# Keep the container alive forever
-sleep infinity
-# force redeploy Sat Jul 25 18:07:43 UTC 2026
+echo "[*] Starting JobSeeker AI supervisor..."
+exec /app/worker-venv/bin/python -u /app/supervisor.py
