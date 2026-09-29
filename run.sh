@@ -21,7 +21,11 @@ echo "[*] Starting Litestream replication..."
 
 # Start PocketBase in background
 echo "[*] Starting PocketBase on port 8090"
-/app/pocketbase serve --http=0.0.0.0:8090 &
+# Keep CORS configuration in the process that starts PocketBase so it applies
+# consistently on Render and in local/container runs. Do not add a proxy-level
+# CORS header: PocketBase owns the response header.
+POCKETBASE_ORIGINS="https://jobseekerai.name.ng,https://jobseekerais.netlify.app,https://jobseeker-backend-p3c3.onrender.com,http://localhost:8090,https://localhost:8090"
+/app/pocketbase serve --http=0.0.0.0:8090 --origins="$POCKETBASE_ORIGINS" &
 PB_PID=$!
 
 sleep 3

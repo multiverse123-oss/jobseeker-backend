@@ -7,6 +7,7 @@ Run inside the worker image:
 import logging
 import os
 from typing import Any
+from xml.etree import ElementTree
 
 import requests
 
@@ -14,21 +15,61 @@ import requests
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - source-probe - %(message)s")
 log = logging.getLogger("source-probe")
 TIMEOUT = (5, 20)
+DEFAULT_HEADERS = {"User-Agent": "JobSeekerAI/1.0 (+https://jobseekerai.name.ng)"}
+
+
+def _job_count(response: requests.Response) -> int:
+    """Count common job-list response shapes without assuming one provider schema."""
+    content_type = response.headers.get("content-type", "").lower()
+    if "json" in content_type:
+        try:
+            payload = response.json()
+        except ValueError:
+            return 0
+
+        if isinstance(payload, list):
+            return len(payload)
+        if not isinstance(payload, dict):
+            return 0
+
+        for key in ("jobs", "results", "data", "hits", "jobs_results", "items"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return len(value)
+        return 0
+
+    if "xml" in content_type or response.text.lstrip().startswith(("<?xml", "<rss", "<feed")):
+        try:
+            root = ElementTree.fromstring(response.content)
+        except ElementTree.ParseError:
+            return 0
+        return sum(1 for node in root.iter() if node.tag.rsplit("}", 1)[-1] in {"item", "entry"})
+
+    return 0
 
 
 def probe(name: str, url: str, **kwargs: Any) -> None:
     try:
-        response = requests.get(url, timeout=TIMEOUT, **kwargs)
+        headers = dict(kwargs.pop("headers", {}) or {})
+        headers.setdefault("User-Agent", DEFAULT_HEADERS["User-Agent"])
+        response = requests.get(url, timeout=TIMEOUT, headers=headers, **kwargs)
+        jobs = _job_count(response)
         healthy = 200 <= response.status_code < 400 and len(response.content) > 0
-        log.info("%s status=%s bytes=%s result=%s", name, response.status_code, len(response.content), "OK" if healthy else "ERROR")
-    except requests.RequestException as exc:
-        log.info("%s result=ERROR reason=%s", name, exc)
+        log.info(
+            "%s status=%s jobs=%s result=%s",
+            name,
+            response.status_code,
+            jobs,
+            "OK" if healthy else "ERROR",
+        )
+    except Exception as exc:
+        log.info("%s status=ERROR jobs=0 result=ERROR reason=%s", name, exc)
 
 
 def configured(name: str, *keys: str) -> bool:
     missing = [key for key in keys if not os.getenv(key)]
     if missing:
-        log.info("%s result=SKIPPED missing=%s", name, ",".join(missing))
+        log.info("%s status=SKIPPED jobs=0 result=SKIPPED missing=%s", name, ",".join(missing))
         return False
     return True
 

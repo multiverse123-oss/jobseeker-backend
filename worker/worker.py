@@ -31,6 +31,7 @@ FINDWORK_KEY = os.getenv("FINDWORK_KEY")
 RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY")
 JSEARCH_HOST = "jsearch.p.rapidapi.com"
 HTTP_TIMEOUT = (5, 20)
+DEFAULT_HEADERS = {"User-Agent": "JobSeekerAI/1.0 (+https://jobseekerai.name.ng)"}
 CHAT_SYSTEM_PROMPT = (
     "You are JobSeeker AI Coach, a friendly and knowledgeable career advisor. "
     "Always respond directly to the user's latest message. "
@@ -54,6 +55,9 @@ source_health: dict[str, dict[str, Any]] = {}
 def _request(method: str, url: str, **kwargs: Any) -> requests.Response | None:
     """Make a bounded request with small backoff; never raises into a worker loop."""
     kwargs.setdefault("timeout", HTTP_TIMEOUT)
+    headers = dict(kwargs.pop("headers", {}) or {})
+    headers.setdefault("User-Agent", DEFAULT_HEADERS["User-Agent"])
+    kwargs["headers"] = headers
     for attempt in range(3):
         try:
             response = requests.request(method, url, **kwargs)
