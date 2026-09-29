@@ -1,11 +1,20 @@
 #!/bin/bash
 set -euo pipefail
 
+: "${LITESTREAM_ACCESS_KEY_ID:?LITESTREAM_ACCESS_KEY_ID must be set}"
+: "${LITESTREAM_SECRET_ACCESS_KEY:?LITESTREAM_SECRET_ACCESS_KEY must be set}"
+: "${LITESTREAM_S3_BUCKET:?LITESTREAM_S3_BUCKET must be set}"
+: "${LITESTREAM_S3_ENDPOINT:?LITESTREAM_S3_ENDPOINT must be set}"
+: "${PB_ADMIN_TOKEN:?PB_ADMIN_TOKEN must be set}"
+: "${MISTRAL_API_KEY:?MISTRAL_API_KEY must be set}"
+
 echo "=== JobSeeker Backend ==="
 
 # Restore database
 if [ ! -f /app/pb_data/data.db ]; then
-  echo "[*] Restoring database from S3..."
+  echo "[*] Restoring DB from bucket=${LITESTREAM_S3_BUCKET} endpoint=${LITESTREAM_S3_ENDPOINT}"
+  echo "[*] Access key length: ${#LITESTREAM_ACCESS_KEY_ID}"
+  echo "[*] Secret length: ${#LITESTREAM_SECRET_ACCESS_KEY}"
   if /app/litestream restore -config /app/litestream.yml /app/pb_data/data.db; then
     echo "[✓] Restore successful"
   else
@@ -32,8 +41,6 @@ sleep 3
 
 # Worker environment. Credentials must be supplied by the deployment secret store.
 export POCKETBASE_URL="http://localhost:8090"
-: "${PB_ADMIN_TOKEN:?PB_ADMIN_TOKEN secret is required}"
-: "${MISTRAL_API_KEY:?MISTRAL_API_KEY secret is required}"
 export POCKETBASE_ADMIN_TOKEN="${PB_ADMIN_TOKEN}"
 export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 export PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
