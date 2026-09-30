@@ -1,4 +1,4 @@
-﻿#!/bin/bash
+#!/bin/bash
 set -euo pipefail
 
 : "${LITESTREAM_ACCESS_KEY_ID:?LITESTREAM_ACCESS_KEY_ID must be set}"
@@ -40,7 +40,7 @@ if [ -n "${PB_ADMIN_TOKEN:-}" ]; then
   export POCKETBASE_ADMIN_TOKEN="${PB_ADMIN_TOKEN}"
   echo "[*] PB_ADMIN_TOKEN provided"
 else
-  echo "[!] PB_ADMIN_TOKEN not set - worker will authenticate via email/password"
+  echo "[!] PB_ADMIN_TOKEN not set - worker will try email/password auth"
 fi
 
 echo "[*] Starting JobSeeker AI supervisor..."
