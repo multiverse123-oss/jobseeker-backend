@@ -246,11 +246,11 @@ def search_adzuna_country(query: str, country: str = "us", location: str = "", n
         return []
 
 
-def search_adzuna(query: str, location: str = "United States", num: int = 10) -> list[dict[str, Any]]:
+def search_adzuna(query: str, location: str = "United States", num: int = 4) -> list[dict[str, Any]]:
     return search_adzuna_country(query, "us", location, num)
 
 
-def search_remotive(query: str, num: int = 10) -> list[dict[str, Any]]:
+def search_remotive(query: str, num: int = 4) -> list[dict[str, Any]]:
     try:
         data = _json(_request("GET", "https://remotive.com/api/remote-jobs", params={"search": query}))
         return [
@@ -275,7 +275,7 @@ def search_remoteok(query: str, num: int = 10) -> list[dict[str, Any]]:
         return []
 
 
-def search_findwork(query: str, num: int = 10) -> list[dict[str, Any]]:
+def search_findwork(query: str, num: int = 4) -> list[dict[str, Any]]:
     if not FINDWORK_KEY:
         return []
     try:
@@ -289,7 +289,7 @@ def search_findwork(query: str, num: int = 10) -> list[dict[str, Any]]:
         return []
 
 
-def search_jsearch(query: str, location: str | None = None, num: int = 10) -> list[dict[str, Any]]:
+def search_jsearch(query: str, location: str | None = None, num: int = 4) -> list[dict[str, Any]]:
     if not RAPIDAPI_KEY:
         return []
     try:
@@ -306,7 +306,7 @@ def search_jsearch(query: str, location: str | None = None, num: int = 10) -> li
         return []
 
 
-def _rss_jobs(url: str, query: str, num: int = 10) -> list[dict[str, Any]]:
+def _rss_jobs(url: str, query: str, num: int = 4) -> list[dict[str, Any]]:
     response = _request("GET", url, headers={"User-Agent": "JobSeekerAI/1.0"})
     if response is None or response.status_code >= 400:
         return []
@@ -322,11 +322,11 @@ def _rss_jobs(url: str, query: str, num: int = 10) -> list[dict[str, Any]]:
     return jobs[:num]
 
 
-def search_upwork_rss(query: str, num: int = 10) -> list[dict[str, Any]]:
+def search_upwork_rss(query: str, num: int = 4) -> list[dict[str, Any]]:
     return _rss_jobs(f"https://www.upwork.com/ab/feed/jobs/rss?{urlencode({'q': query})}", query, num)
 
 
-def search_reddit_forhire(query: str, num: int = 10) -> list[dict[str, Any]]:
+def search_reddit_forhire(query: str, num: int = 4) -> list[dict[str, Any]]:
     try:
         response = _request("GET", "https://www.reddit.com/r/forhire/new.json", params={"limit": 50}, headers={"User-Agent": "JobSeekerAI/1.0"})
         data = response.json() if response is not None and response.status_code < 400 else {}
@@ -343,7 +343,7 @@ def search_reddit_forhire(query: str, num: int = 10) -> list[dict[str, Any]]:
         return []
 
 
-def search_hackernews(query: str, num: int = 10) -> list[dict[str, Any]]:
+def search_hackernews(query: str, num: int = 4) -> list[dict[str, Any]]:
     try:
         data = _json(_request("GET", "https://hn.algolia.com/api/v1/search_by_date", params={"query": f"who is hiring {query}", "tags": "story", "hitsPerPage": num}))
         return [_job(h.get("title"), "Hacker News", h.get("story_text"), "Remote / Hacker News", True, h.get("url") or f"https://news.ycombinator.com/item?id={h.get('objectID')}", h.get("created_at"), h.get("url", "")) for h in data.get("hits", [])]
@@ -352,11 +352,11 @@ def search_hackernews(query: str, num: int = 10) -> list[dict[str, Any]]:
         return []
 
 
-def search_careerjet(query: str, country: str = "us", num: int = 10) -> list[dict[str, Any]]:
+def search_careerjet(query: str, country: str = "us", num: int = 4) -> list[dict[str, Any]]:
     return _rss_jobs(f"https://www.careerjet.com/search/rss?s={quote(query)}&l=&c={country}", query, num)
 
 
-def search_searxng(query: str, instance: str = "https://search.sapti.me", num: int = 10) -> list[dict[str, Any]]:
+def search_searxng(query: str, instance: str = "https://search.sapti.me", num: int = 4) -> list[dict[str, Any]]:
     try:
         data = _json(_request("GET", f"{instance.rstrip('/')}/search", params={"q": f"{query} jobs", "format": "json", "categories": "it"}))
         return [_job(r.get("title"), "SearXNG", r.get("content"), "", True, r.get("url"), "", r.get("url")) for r in data.get("results", [])[:num]]
@@ -385,7 +385,7 @@ def search_stract(query: str, num: int = 10) -> list[dict[str, Any]]:
 
 # Eight keyless additions: Arbeitnow, Jobicy, Himalayas, Working Nomads,
 # The Muse, Jobspresso, We Work Remotely, and Remote.co.
-def search_arbeitnow(query: str, num: int = 10) -> list[dict[str, Any]]:
+def search_arbeitnow(query: str, num: int = 7) -> list[dict[str, Any]]:
     try:
         data = _json(_request("GET", "https://www.arbeitnow.com/api/job-board-api"))
         return [_job(j.get("title"), j.get("company_name"), j.get("description"), j.get("location"), j.get("remote"), j.get("url"), j.get("created_at"), j.get("url")) for j in data.get("data", []) if query.lower() in json.dumps(j).lower()][:num]
@@ -396,14 +396,14 @@ def search_arbeitnow(query: str, num: int = 10) -> list[dict[str, Any]]:
 
 def search_jobicy(query: str, num: int = 10) -> list[dict[str, Any]]:
     try:
-        data = _json(_request("GET", "https://jobicy.com/api/v2/remote-jobs", params={"count": 50}))
+        data = _json(_request("GET", "https://jobicy.com/api/v2/remote-jobs", params={"count": 30}))
         return [_job(j.get("jobTitle"), j.get("companyName"), j.get("jobDescription"), j.get("jobGeo"), True, j.get("url"), j.get("pubDate"), j.get("url")) for j in data.get("jobs", []) if query.lower() in json.dumps(j).lower()][:num]
     except Exception as exc:
         log.warning("Jobicy failed: %s", exc)
         return []
 
 
-def search_himalayas(query: str, num: int = 10) -> list[dict[str, Any]]:
+def search_himalayas(query: str, num: int = 5) -> list[dict[str, Any]]:
     try:
         data = _json(_request("GET", "https://himalayas.app/jobs/api"))
         return [_job(j.get("title"), j.get("companyName"), j.get("description"), j.get("location"), True, j.get("applicationLink") or j.get("url"), j.get("pubDate"), j.get("url")) for j in data.get("jobs", []) if query.lower() in json.dumps(j).lower()][:num]
@@ -412,7 +412,7 @@ def search_himalayas(query: str, num: int = 10) -> list[dict[str, Any]]:
         return []
 
 
-def search_working_nomads(query: str, num: int = 10) -> list[dict[str, Any]]:
+def search_working_nomads(query: str, num: int = 5) -> list[dict[str, Any]]:
     try:
         response = _request("GET", "https://www.workingnomads.com/api/exposed_jobs/")
         data = response.json() if response is not None and response.status_code < 400 else []
@@ -431,15 +431,15 @@ def search_themuse(query: str, num: int = 10) -> list[dict[str, Any]]:
         return []
 
 
-def search_jobspresso(query: str, num: int = 10) -> list[dict[str, Any]]:
+def search_jobspresso(query: str, num: int = 5) -> list[dict[str, Any]]:
     return _rss_jobs("https://jobspresso.co/remote-work/feed/", query, num)
 
 
-def search_weworkremotely(query: str, num: int = 10) -> list[dict[str, Any]]:
+def search_weworkremotely(query: str, num: int = 7) -> list[dict[str, Any]]:
     return _rss_jobs("https://weworkremotely.com/remote-jobs.rss", query, num)
 
 
-def search_remoteco(query: str, num: int = 10) -> list[dict[str, Any]]:
+def search_remoteco(query: str, num: int = 5) -> list[dict[str, Any]]:
     return _rss_jobs("https://remote.co/remote-jobs/feed/", query, num)
 
 
@@ -497,7 +497,7 @@ def _source_functions(title: str, location: str) -> list[tuple[str, Callable[[],
     return sources
 
 
-def agentic_job_search(title: str, location: str | None, num_per_source: int = 8) -> tuple[list[dict[str, Any]], int]:
+def agentic_job_search(title: str, location: str | None, num_per_source: int = 3) -> tuple[list[dict[str, Any]], int]:
     location = location or "United States"
     all_jobs: list[dict[str, Any]] = []
     sources = _source_functions(title, location)
@@ -678,7 +678,7 @@ def scraping_loop() -> None:
             log.info("Scraping cycle complete; sleeping 10 minutes")
         except Exception as exc:
             log.exception("Scraping loop recovered from error: %s", exc)
-        time.sleep(600)
+        time.sleep(3600)
 
 
 def _start_thread(target: Callable[..., None], name: str, *args: Any) -> threading.Thread:
