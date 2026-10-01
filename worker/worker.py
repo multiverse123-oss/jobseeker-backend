@@ -1,4 +1,4 @@
-"""Resilient PocketBase worker for JobSeeker AI backend.
+-"""Resilient PocketBase worker for JobSeeker AI backend.
 
 Responsibilities:
   * Legacy chat replies (chat_messages collection)
@@ -19,6 +19,8 @@ from typing import Any, Callable
 from urllib.parse import quote, urlencode
 
 import requests
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 from bs4 import BeautifulSoup
 from openai import OpenAI
 from serpapi import GoogleSearch
@@ -485,17 +487,56 @@ def search_careerjet(query: str, country: str = "us", num: int = 4) -> list:
     return _rss_jobs(f"https://www.careerjet.com/search/rss?s={quote(query)}&l=&c={country}", query, num)
 
 
-def search_searxng(query: str, instance: str = "https://search.sapti.me", num: int = 4) -> list:
-    try:
-        data = _json(_request("GET", f"{instance.rstrip('/')}/search",
-                              params={"q": f"{query} jobs", "format": "json",
-                                      "categories": "it"}))
-        return [_job(r.get("title"), "SearXNG", r.get("content"), "",
+# Public SearXNG instances — first one that responds wins.
+# SSL errors on public instances are tolerated (they are third-party and often misconfigured).
+SEARXNG_INSTANCES = [
+    "https://searx.be",
+    "https://search.inetol.net",
+    "https://searx.tiekoetter.com",
+    "https://baresearch.org",
+    "https://search.rhscz.eu",
+    "https://priv.au",
+    "https://search.bus-hit.me",
+    "https://search.sapti.me",   # last resort, was failing previously
+]
+
+
+def search_searxng(query: str, instance: str = None, num: int = 4) -> list:
+    """Try every known SearXNG instance until one works.
+    Tolerates SSL errors on individual instances (public third-party service)."""
+    instances = [instance] if instance else SEARXNG_INSTANCES
+    for inst in instances:
+        try:
+            response = requests.get(
+                f"{inst.rstrip('/')}/search",
+                params={"q": f"{query} jobs", "format": "json", "categories": "it"},
+                headers={"User-Agent": DEFAULT_HEADERS["User-Agent"]},
+                timeout=HTTP_TIMEOUT,
+                verify=False,
+            )
+            if response is None or response.status_code >= 400:
+                log.warning("SearXNG %s status=%s", inst,
+                            response.status_code if response is not None else "no-response")
+                continue
+            try:
+                data = response.json() if response.text else {}
+            except ValueError:
+                log.warning("SearXNG %s returned non-JSON", inst)
+                continue
+            results = data.get("results", []) if isinstance(data, dict) else []
+            if not results:
+                continue
+            log.info("SearXNG %s returned %d results", inst, len(results))
+            return [
+                _job(r.get("title"), "SearXNG", r.get("content"), "",
                      True, r.get("url"), "", r.get("url"))
-                for r in data.get("results", [])[:num]]
-    except Exception as exc:
-        log.warning("SearXNG %s failed: %s", instance, exc)
-        return []
+                for r in results[:num]
+            ]
+        except Exception as exc:
+            log.warning("SearXNG %s failed: %s", inst, exc)
+            continue
+    log.warning("SearXNG all instances failed for query=%s", query)
+    return []
 
 
 def search_metager(query: str, num: int = 10) -> list:
